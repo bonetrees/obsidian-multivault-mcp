@@ -1,0 +1,272 @@
+"""Async HTTP client for one obsidian-local-rest-api vault.
+
+One ObsidianVaultClient instance per configured vault. Each method maps to a
+single REST endpoint and raises ToolError on transport or HTTP failure.
+"""
+
+import json
+import os
+import urllib.parse
+from typing import Any
+
+import httpx
+from fastmcp.exceptions import ToolError
+
+from .logging_config import setup_logging
+
+logger = setup_logging("obsidian-multivault-mcp.client")
+
+
+class ObsidianVaultClient:
+    HEALTH_CHECK_TIMEOUT = 3.0
+    DEFAULT_TIMEOUT = 30.0
+    CONNECT_TIMEOUT = 10.0
+
+    DATAVIEW_NOT_INSTALLED_CODE = 40070
+    INVALID_PATCH_TARGET_CODE = 40080
+
+    def __init__(
+        self,
+        name: str,
+        base_url: str,
+        api_key: str,
+        verify_ssl: bool = False,
+        timeout: float | None = None,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        self.name = name
+        self.base_url = base_url
+        self._timeout = (
+            timeout
+            if timeout is not None
+            else float(os.environ.get("OBSIDIAN_MCP_TIMEOUT", str(self.DEFAULT_TIMEOUT)))
+        )
+        kwargs: dict[str, Any] = {
+            "base_url": base_url,
+            "headers": {"Authorization": f"Bearer {api_key}"},
+            "timeout": httpx.Timeout(self._timeout, connect=self.CONNECT_TIMEOUT),
+            "verify": verify_ssl,
+        }
+        if transport is not None:
+            kwargs["transport"] = transport
+        self._client_kwargs = kwargs
+        self._http: httpx.AsyncClient | None = None
+
+    async def __aenter__(self) -> "ObsidianVaultClient":
+        self._http = httpx.AsyncClient(**self._client_kwargs)
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        if self._http is not None:
+            await self._http.aclose()
+            self._http = None
+
+    # --- helpers ---
+
+    def _require_http(self) -> httpx.AsyncClient:
+        if self._http is None:
+            raise RuntimeError(
+                f"ObsidianVaultClient for '{self.name}' used outside async-with block"
+            )
+        return self._http
+
+    @staticmethod
+    def _encode_path(path: str) -> str:
+        return urllib.parse.quote(path, safe="/")
+
+    @staticmethod
+    def _parse_error_body(response: httpx.Response) -> dict:
+        try:
+            body = response.json()
+        except (json.JSONDecodeError, ValueError):
+            return {}
+        return body if isinstance(body, dict) else {}
+
+    def _raise_for_status(
+        self,
+        response: httpx.Response,
+        operation: str,
+        path: str | None = None,
+    ) -> None:
+        if response.is_success:
+            return
+        body = self._parse_error_body(response)
+        msg = body.get("message") or (response.text.strip() if response.text else "(no body)")
+        code = body.get("errorCode")
+        location = f" at '{path}'" if path else ""
+        if response.status_code == 401:
+            raise ToolError(
+                f"Authentication failed for vault '{self.name}'. " f"Check the API key. ({msg})"
+            )
+        if response.status_code == 404:
+            raise ToolError(f"Not found{location} in vault '{self.name}': {msg}")
+        if response.status_code == 405:
+            raise ToolError(f"Operation not supported{location} in vault '{self.name}': {msg}")
+        if code == self.INVALID_PATCH_TARGET_CODE:
+            raise ToolError(
+                f"Invalid PATCH target{location} in vault '{self.name}': {msg}. "
+                "Heading targets must use the full path from the document root, "
+                "with '::' as the separator (e.g. 'Report::Findings::Critical')."
+            )
+        code_part = f", errorCode {code}" if code is not None else ""
+        raise ToolError(
+            f"{operation} failed for vault '{self.name}'{location} "
+            f"(HTTP {response.status_code}{code_part}): {msg}"
+        )
+
+    async def _request(
+        self,
+        method: str,
+        url: str,
+        operation: str,
+        **kwargs: Any,
+    ) -> httpx.Response:
+        http = self._require_http()
+        try:
+            return await http.request(method, url, **kwargs)
+        except httpx.ConnectError as exc:
+            raise ToolError(
+                f"Cannot connect to vault '{self.name}' at {self.base_url}. "
+                f"Is Obsidian running with the Local REST API plugin enabled? ({exc})"
+            ) from exc
+        except httpx.TimeoutException as exc:
+            raise ToolError(
+                f"Request to vault '{self.name}' timed out after {self._timeout}s "
+                f"during {operation}. ({exc})"
+            ) from exc
+
+    # --- public API ---
+
+    async def get_status(self) -> bool:
+        """Quick liveness probe. Returns True if the plugin responds with status OK.
+
+        Uses a tight 3 s timeout independent of OBSIDIAN_MCP_TIMEOUT so list_vaults
+        does not hang when one vault is offline. Never raises — failures map to False.
+        """
+        if self._http is None:
+            return False
+        try:
+            response = await self._http.get("/", timeout=self.HEALTH_CHECK_TIMEOUT)
+        except (httpx.ConnectError, httpx.TimeoutException, httpx.RequestError):
+            return False
+        if response.status_code != 200:
+            return False
+        body = self._parse_error_body(response)
+        return body.get("status") == "OK"
+
+    async def read_note(self, path: str) -> dict:
+        response = await self._request(
+            "GET",
+            f"/vault/{self._encode_path(path)}",
+            operation="read_note",
+            headers={"Accept": "application/vnd.olrapi.note+json"},
+        )
+        self._raise_for_status(response, "read_note", path)
+        return response.json()
+
+    async def write_note(self, path: str, content: str) -> None:
+        response = await self._request(
+            "PUT",
+            f"/vault/{self._encode_path(path)}",
+            operation="write_note",
+            content=content.encode("utf-8"),
+            headers={"Content-Type": "text/markdown"},
+        )
+        self._raise_for_status(response, "write_note", path)
+
+    async def append_note(self, path: str, content: str) -> None:
+        response = await self._request(
+            "POST",
+            f"/vault/{self._encode_path(path)}",
+            operation="append_note",
+            content=content.encode("utf-8"),
+            headers={"Content-Type": "text/markdown"},
+        )
+        self._raise_for_status(response, "append_note", path)
+
+    async def patch_note(
+        self,
+        path: str,
+        operation: str,
+        target_type: str,
+        target: str,
+        content: str,
+    ) -> None:
+        headers = {
+            "Operation": operation,
+            "Target-Type": target_type,
+            "Target": urllib.parse.quote(target, safe=""),
+            "Content-Type": "text/markdown",
+        }
+        response = await self._request(
+            "PATCH",
+            f"/vault/{self._encode_path(path)}",
+            operation="patch_note",
+            content=content.encode("utf-8"),
+            headers=headers,
+        )
+        self._raise_for_status(response, "patch_note", path)
+
+    async def delete_note(self, path: str) -> None:
+        response = await self._request(
+            "DELETE",
+            f"/vault/{self._encode_path(path)}",
+            operation="delete_note",
+        )
+        self._raise_for_status(response, "delete_note", path)
+
+    async def list_directory(self, path: str) -> list[str]:
+        url = f"/vault/{self._encode_path(path)}/" if path else "/vault/"
+        response = await self._request("GET", url, operation="list_directory")
+        self._raise_for_status(response, "list_directory", path)
+        body = response.json()
+        return list(body.get("files", []))
+
+    async def search_simple(self, query: str, context_length: int) -> list[dict]:
+        response = await self._request(
+            "POST",
+            "/search/simple/",
+            operation="search_simple",
+            params={"query": query, "contextLength": context_length},
+        )
+        self._raise_for_status(response, "search_simple")
+        body = response.json()
+        return body if isinstance(body, list) else []
+
+    async def search_jsonlogic(self, query: dict) -> list[dict]:
+        response = await self._request(
+            "POST",
+            "/search/",
+            operation="search_jsonlogic",
+            content=json.dumps(query).encode("utf-8"),
+            headers={"Content-Type": "application/vnd.olrapi.jsonlogic+json"},
+        )
+        self._raise_for_status(response, "search_jsonlogic")
+        body = response.json()
+        return body if isinstance(body, list) else []
+
+    async def search_dataview(
+        self, query: str, context_length: int = 100
+    ) -> tuple[list[dict], str | None]:
+        """Returns (results, warning). On Dataview-not-installed (40070), falls
+        back to search_simple and the warning is populated.
+        """
+        response = await self._request(
+            "POST",
+            "/search/",
+            operation="search_dataview",
+            content=query.encode("utf-8"),
+            headers={"Content-Type": "application/vnd.olrapi.dataview.dql+txt"},
+        )
+        if response.status_code == 400:
+            body = self._parse_error_body(response)
+            if body.get("errorCode") == self.DATAVIEW_NOT_INSTALLED_CODE:
+                logger.info(
+                    "Dataview not installed in vault '%s'; falling back to text search.",
+                    self.name,
+                )
+                fallback = await self.search_simple(query, context_length)
+                return fallback, "Dataview not available, fell back to text search"
+        self._raise_for_status(response, "search_dataview")
+        body = response.json()
+        return (body if isinstance(body, list) else []), None
