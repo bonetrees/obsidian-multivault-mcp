@@ -27,7 +27,8 @@ src/obsidian_multivault_mcp/
 ├── validation_types.py  # VaultName, VaultPath, PatchOperation, PatchTargetType, SearchType, ClampedContextLength
 ├── logging_config.py    # Centralized stdlib logging
 └── tools/
-    ├── __init__.py      # Imports trigger @mcp.tool() registration
+    ├── __init__.py      # pkgutil auto-discovery: imports every non-_-prefixed module → @mcp.tool() runs
+    ├── _helpers.py      # Shared curators: strip_frontmatter, epoch_ms_to_iso, curate_*_match
     ├── list_vaults.py   # Discovery: returns vault names + Index.md content
     ├── list_directory.py
     ├── read_note.py
@@ -62,7 +63,7 @@ tests/
 
 - **API key strategy.** Fail-fast at lifespan startup. Missing or empty API key env vars raise `RuntimeError` immediately.
 
-- **Timeout enforcement.** `httpx.Timeout(30.0, connect=10.0)` on client. Configurable via `OBSIDIAN_MCP_TIMEOUT`. Timeout exceptions caught and raised as `ToolError` with vault name and operation.
+- **Timeout enforcement.** `httpx.Timeout(30.0, connect=10.0)` on client. Configurable via `OBSIDIAN_MCP_TIMEOUT`. Timeout exceptions caught and raised as `ToolError` with vault name and operation. **Health check uses a 3 s timeout** (constant `HEALTH_CHECK_TIMEOUT` on the client, not user-configurable) so `list_vaults` doesn't hang when a vault is offline; `get_status()` never raises, it returns `False` on any failure.
 
 - **Client API pattern.** Per-endpoint methods on `ObsidianVaultClient`: `read_note()`, `write_note()`, `append_note()`, `patch_note()`, `delete_note()`, `list_directory()`, `search_simple()`, `search_jsonlogic()`, `search_dataview()`, `get_status()`.
 
@@ -72,7 +73,7 @@ tests/
 
 - **Error handling.** Catch `httpx.HTTPStatusError`, `httpx.ConnectError`, `httpx.TimeoutException` → raise `ToolError`. Never return `{"error": ...}` dicts. Parse API error body `{"message": str, "errorCode": int}` for actionable messages.
 
-- **Curator: frontmatter stripping.** Raw API `content` includes YAML frontmatter fences. Curator detects leading `---\n`, finds closing `---\n`, strips everything between (inclusive). Return clean markdown only.
+- **Curator: frontmatter stripping.** Raw API `content` includes YAML frontmatter fences. Curator regex `^---\n.*?---\n` (with `re.DOTALL`) strips the leading block including both fences; empty frontmatter (`---\n---\n`) is also stripped. Malformed/unterminated blocks pass through unchanged.
 
 - **Curator: directory listing.** API returns single `files` array. Entries ending with `/` are folders (strip trailing slash). Others are files.
 
@@ -82,7 +83,7 @@ tests/
 
 - **Empty results.** Search returning `[]` is valid, not an error. Vault with no `Index.md` returns `index: None` in `list_vaults`, not an error.
 
-- **Dataview fallback.** When Dataview not installed, API returns HTTP 400 with `errorCode: 40070`. Client catches this, falls back to simple text search, includes `"warning": "Dataview not available, fell back to text search"` in response. **Fallback is per-vault** — in `search_all_vaults`, if vault A has Dataview and vault B doesn't, each handles fallback independently inside its own client call.
+- **Dataview fallback.** When Dataview not installed, API returns HTTP 400 with `errorCode: 40070`. `search_dataview()` returns `tuple[list[dict], str | None]` — second element is the warning string when fallback happened (`"Dataview not available, fell back to text search"`), otherwise `None`. **Fallback is per-vault** — in `search_all_vaults`, if vault A has Dataview and vault B doesn't, each handles fallback independently inside its own client call.
 
 ## Known Issues / Gotchas
 
@@ -126,12 +127,12 @@ All client tests use `httpx.MockTransport`. Each REST API method gets its own mo
 
 1. Create `src/obsidian_multivault_mcp/tools/new_tool.py`
 2. Import `mcp`, `get_client` from `..server` and types from `..validation_types`
-3. Write `_curate_new_result(raw: dict) -> dict` — handle timestamp conversion, field renames, frontmatter stripping if applicable
-4. Write `@mcp.tool(annotations={...}, tags={...})` async function with `Annotated` params, `ToolError` exception handling
-5. Add client method to `client.py` — per-endpoint pattern, include `verify_ssl` passthrough
-6. Add import to `tools/__init__.py`
-7. Add tests: curator in `test_curators.py`, integration in `test_tools.py` (auto-discovered by conftest fixture)
-8. Run `poetry run pytest tests/ && poetry run black src/ && poetry run pylint src/`
+3. Write `curate_new_result(raw: dict) -> dict` — handle timestamp conversion, field renames, frontmatter stripping if applicable. Reuse helpers from `tools/_helpers.py` (`strip_frontmatter`, `epoch_ms_to_iso`, `curate_simple_match`, `curate_structured_match`).
+4. Write `@mcp.tool(annotations={...}, tags={...})` async function with `Annotated` params and an LLM-facing docstring. Let `ToolError` propagate from the client layer.
+5. Add a client method to `client.py` — per-endpoint pattern.
+6. **No edits to `tools/__init__.py` needed** — `pkgutil.iter_modules()` auto-discovers any non-`_`-prefixed module at import time.
+7. Add tests: curator in `test_curators.py`, integration in `test_tools.py` using the `mcp_client` + `vault_handlers` fixtures from `conftest.py`.
+8. Run `poetry run pytest tests/ && poetry run black src/ tests/ && poetry run pylint src/obsidian_multivault_mcp/`
 
 ## Code Style
 
