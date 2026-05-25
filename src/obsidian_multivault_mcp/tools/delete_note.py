@@ -15,7 +15,9 @@ from ..validation_types import VaultFilePath, VaultName
     },
     tags={"obsidian", "write"},
 )
-async def delete_note(ctx: Context, vault: VaultName, path: VaultFilePath, confirm: bool) -> dict:
+async def delete_note(
+    ctx: Context, vault: VaultName, path: VaultFilePath, confirm: bool = False
+) -> dict:
     """Delete a note from a vault. Destructive — confirm with the user first.
 
     `confirm` must be `True` to proceed; this is a safety gate to prevent

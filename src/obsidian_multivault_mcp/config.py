@@ -1,6 +1,8 @@
 """YAML config loader. Resolves API keys from env vars at startup."""
 
+import ipaddress
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,6 +19,50 @@ DEFAULT_CONFIG_PATH = "./obsidian-multivault-mcp-config.yaml"
 # For any other host we keep verification on so a misconfigured remote
 # vault doesn't silently fall back to an unverified TLS session.
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+# Bare DNS labels per RFC 1123: alphanumerics and hyphens, dots between labels,
+# no leading/trailing hyphen on any label. Used to validate host strings that
+# aren't IP literals.
+_DNS_NAME_RE = re.compile(
+    r"^(?=.{1,253}$)"
+    r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*"
+    r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$"
+)
+
+
+def _validate_host(name: str, host: str) -> None:
+    """Reject hosts that look like URLs or include a port.
+
+    The caller already strips surrounding brackets for IPv6 URL form.
+    What we want to catch here is e.g. ``"127.0.0.1:27124"`` (port in the
+    host string) and ``"https://vault.example.com"`` (scheme in the host
+    string) — both produce malformed URLs once we paste ``host`` into
+    ``f"{scheme}://{host}:{port}"``.
+    """
+    if "://" in host:
+        raise RuntimeError(
+            f"Vault '{name}' host must not include a scheme, got: {host!r}. "
+            "Set the scheme via the 'scheme' field."
+        )
+    if "/" in host:
+        raise RuntimeError(f"Vault '{name}' host must not include a path, got: {host!r}.")
+
+    # Accept anything that parses as an IP address. ip_address rejects
+    # "127.0.0.1:27124" because ":27124" isn't valid in an IPv4 dotted-quad.
+    try:
+        ipaddress.ip_address(host)
+        return
+    except ValueError:
+        pass
+
+    if ":" in host:
+        raise RuntimeError(
+            f"Vault '{name}' host {host!r} is not a valid IPv4/IPv6 literal. "
+            "Did you include a port? Configure the port via the 'port' field."
+        )
+
+    if not _DNS_NAME_RE.match(host):
+        raise RuntimeError(f"Vault '{name}' host {host!r} is not a valid DNS name or IP literal.")
 
 
 @dataclass(frozen=True)
@@ -113,6 +159,7 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
             host = host[1:-1]
             if not host:
                 raise RuntimeError(f"Vault '{name}' host must not be empty brackets.")
+        _validate_host(name, host)
 
         port = entry.get("port")
         # bool is a subclass of int in Python, so isinstance(True, int) is True.

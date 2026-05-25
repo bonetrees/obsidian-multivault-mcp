@@ -266,6 +266,13 @@ class TestDeleteNote:
             )
         assert "confirm=True" in str(exc_info.value)
 
+    async def test_delete_omitted_confirm_hits_runtime_gate(self, mcp_client):
+        # confirm defaults to False so the LLM-friendly runtime gate fires
+        # instead of a less-helpful Pydantic schema error.
+        with pytest.raises(Exception) as exc_info:
+            await _call(mcp_client, "delete_note", {"vault": "v", "path": "old.md"})
+        assert "confirm=True" in str(exc_info.value)
+
     async def test_delete_with_confirm(self, mcp_client):
         data = await _call(
             mcp_client,

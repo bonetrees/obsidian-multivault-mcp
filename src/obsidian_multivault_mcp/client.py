@@ -121,7 +121,8 @@ class ObsidianVaultClient:
         location = f" at '{path}'" if path else ""
         if response.status_code == 401:
             raise ToolError(
-                f"Authentication failed for vault '{self.name}'. " f"Check the API key. ({msg})"
+                f"Authentication failed for vault '{self.name}' during {operation}"
+                f"{location} (HTTP 401). Check the API key. ({msg})"
             )
         if response.status_code == 404:
             raise NotFound(f"Not found{location} in vault '{self.name}': {msg}")

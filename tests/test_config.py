@@ -149,6 +149,83 @@ class TestLoadConfigValidation:
         with pytest.raises(RuntimeError, match="not found"):
             load_config(tmp_path / "nope.yaml")
 
+    def test_host_with_port_rejected(self, tmp_path, monkeypatch):
+        # "127.0.0.1:27124" looks like an IPv6 marker (has ":") but isn't a
+        # valid IP. Catching this at load time saves operators from a
+        # confusing connect error against a malformed URL.
+        monkeypatch.setenv("OBSIDIAN_VAULT_API_KEY", "k")
+        path = _write_config(
+            tmp_path,
+            textwrap.dedent(
+                """\
+                vaults:
+                  v:
+                    scheme: "https"
+                    host: "127.0.0.1:27124"
+                    port: 27124
+                    api_key_env: "OBSIDIAN_VAULT_API_KEY"
+                """
+            ),
+        )
+        with pytest.raises(RuntimeError, match="Did you include a port"):
+            load_config(path)
+
+    def test_host_with_scheme_rejected(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("OBSIDIAN_VAULT_API_KEY", "k")
+        path = _write_config(
+            tmp_path,
+            textwrap.dedent(
+                """\
+                vaults:
+                  v:
+                    scheme: "https"
+                    host: "https://vault.example.com"
+                    port: 27124
+                    api_key_env: "OBSIDIAN_VAULT_API_KEY"
+                """
+            ),
+        )
+        with pytest.raises(RuntimeError, match="scheme"):
+            load_config(path)
+
+    def test_host_with_path_rejected(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("OBSIDIAN_VAULT_API_KEY", "k")
+        path = _write_config(
+            tmp_path,
+            textwrap.dedent(
+                """\
+                vaults:
+                  v:
+                    scheme: "https"
+                    host: "vault.example.com/api"
+                    port: 27124
+                    api_key_env: "OBSIDIAN_VAULT_API_KEY"
+                """
+            ),
+        )
+        with pytest.raises(RuntimeError, match="path"):
+            load_config(path)
+
+    def test_dns_name_accepted(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("OBSIDIAN_VAULT_API_KEY", "k")
+        path = _write_config(
+            tmp_path,
+            textwrap.dedent(
+                """\
+                vaults:
+                  v:
+                    scheme: "https"
+                    host: "vault.example.com"
+                    port: 27124
+                    api_key_env: "OBSIDIAN_VAULT_API_KEY"
+                """
+            ),
+        )
+        cfg = load_config(path)
+        assert cfg.vaults["v"].host == "vault.example.com"
+        # Non-loopback HTTPS keeps verification on.
+        assert cfg.vaults["v"].verify_ssl is True
+
     def test_bracketed_ipv6_normalised_to_unbracketed(self, tmp_path, monkeypatch):
         # User writes "[::1]" in YAML (URL form). Canonical storage strips
         # the brackets so LOOPBACK_HOSTS matching ("::1") still works.

@@ -122,8 +122,13 @@ class TestReadNote:
         async with make_client(handler) as client:
             with pytest.raises(ToolError) as exc_info:
                 await client.read_note("foo.md")
-        assert "Authentication failed" in str(exc_info.value)
-        assert "API key" in str(exc_info.value)
+        msg = str(exc_info.value)
+        assert "Authentication failed" in msg
+        assert "API key" in msg
+        # 401 messages must carry the same operation/path context as other branches
+        # so a per-vault auth failure is diagnosable from the message alone.
+        assert "read_note" in msg
+        assert "foo.md" in msg
 
 
 class TestWriteNote:
