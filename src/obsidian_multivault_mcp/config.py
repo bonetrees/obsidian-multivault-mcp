@@ -48,7 +48,8 @@ class Config:
     path: Path
 
 
-def load_config(path: str | os.PathLike | None = None) -> Config:  # pylint: disable=too-many-branches
+# pylint: disable-next=too-many-branches
+def load_config(path: str | os.PathLike | None = None) -> Config:
     config_path = Path(path or os.environ.get("OBSIDIAN_MCP_CONFIG", DEFAULT_CONFIG_PATH))
     if not config_path.exists():
         raise RuntimeError(

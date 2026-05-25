@@ -1,7 +1,5 @@
 """Pure-function tests for tool curators and helpers."""
 
-from datetime import timezone
-
 import pytest
 
 from obsidian_multivault_mcp.tools._helpers import (

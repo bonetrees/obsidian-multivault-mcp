@@ -17,6 +17,15 @@ from .logging_config import setup_logging
 logger = setup_logging("obsidian-multivault-mcp.client")
 
 
+class NotFound(ToolError):
+    """Raised when an Obsidian REST endpoint returns HTTP 404.
+
+    Subclass of ToolError so FastMCP still surfaces it correctly, but
+    callers (e.g. list_vaults) can catch this specific case without
+    inspecting error message strings.
+    """
+
+
 class ObsidianVaultClient:
     HEALTH_CHECK_TIMEOUT = 3.0
     DEFAULT_TIMEOUT = 30.0
@@ -99,7 +108,7 @@ class ObsidianVaultClient:
                 f"Authentication failed for vault '{self.name}'. " f"Check the API key. ({msg})"
             )
         if response.status_code == 404:
-            raise ToolError(f"Not found{location} in vault '{self.name}': {msg}")
+            raise NotFound(f"Not found{location} in vault '{self.name}': {msg}")
         if response.status_code == 405:
             raise ToolError(f"Operation not supported{location} in vault '{self.name}': {msg}")
         if code == self.INVALID_PATCH_TARGET_CODE:
@@ -133,6 +142,15 @@ class ObsidianVaultClient:
             raise ToolError(
                 f"Request to vault '{self.name}' timed out after {self._timeout}s "
                 f"during {operation}. ({exc})"
+            ) from exc
+        except httpx.RequestError as exc:
+            # Catch-all for any other transport-layer error (protocol errors,
+            # read errors, decoding errors, …) that isn't connect/timeout.
+            # Keeps the module's "raises ToolError on transport failure"
+            # contract honest — nothing httpx-shaped leaks past _request.
+            raise ToolError(
+                f"Transport error talking to vault '{self.name}' during {operation}: "
+                f"{type(exc).__name__}: {exc}"
             ) from exc
 
     # --- public API ---

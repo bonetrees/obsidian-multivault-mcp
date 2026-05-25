@@ -53,7 +53,7 @@ tests/
 
 - **Multi-vault config.** YAML file path set via `OBSIDIAN_MCP_CONFIG` env var. Each vault entry has `scheme`, `host`, `port`, `api_key_env`. Keys never stored in YAML — `api_key_env` names the env var holding the key. Config loaded and validated at lifespan startup.
 
-- **HTTPS with self-signed certs.** Plugin defaults to HTTPS:27124 with self-signed cert. Client uses `verify=False` in httpx when `scheme == "https"`. Config `scheme` field defaults to `"https"`.
+- **HTTPS with self-signed certs.** Plugin defaults to HTTPS:27124 with self-signed cert. `VaultConfig.verify_ssl` derives from host: HTTPS to loopback (`127.0.0.1`, `localhost`, `::1`) → `verify=False` (the plugin's self-signed cert is expected and the loopback interface isn't MITM-able); HTTPS to anything else → `verify=True` so a misconfigured remote vault can't silently fall back to an unverified TLS session. Config `scheme` field defaults to `"https"`. The `LOOPBACK_HOSTS` set lives in `config.py`.
 
 - **Client per vault.** One `ObsidianVaultClient` instance per configured vault, stored in `dict[str, ObsidianVaultClient]`. Created in lifespan via `AsyncExitStack`. Base URL: `f"{scheme}://{host}:{port}"`.
 

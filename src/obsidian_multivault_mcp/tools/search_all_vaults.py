@@ -26,7 +26,7 @@ async def _one_vault(name, client, search_type, query, context_length) -> tuple[
         # Per-vault isolation: never let one vault's failure kill the whole fan-out.
         # Catch broadly (not just ToolError) so unexpected runtime errors stay scoped
         # to the vault that produced them.
-        logger.warning("Vault %r search failed: %s", name, exc)
+        logger.warning("Vault %r search failed", name, exc_info=True)
         return name, {
             "status": "error",
             "results": [],

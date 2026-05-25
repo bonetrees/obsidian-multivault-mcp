@@ -29,23 +29,6 @@ def _note_response(content="Body text", frontmatter=None, tags=None):
     )
 
 
-def _make_router(routes):
-    """routes: list of (method, path_prefix, handler_callable_or_response)."""
-
-    def handler(request):
-        for method, path_prefix, response_or_fn in routes:
-            if request.method == method and request.url.path.startswith(path_prefix):
-                if callable(response_or_fn):
-                    return response_or_fn(request)
-                return response_or_fn
-        return httpx.Response(
-            404,
-            json={"errorCode": 40400, "message": f"unmocked: {request.method} {request.url.path}"},
-        )
-
-    return handler
-
-
 async def _call(mcp_client, tool, args):
     result = await mcp_client.call_tool(tool, args)
     return result.data

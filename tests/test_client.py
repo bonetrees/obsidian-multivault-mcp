@@ -6,7 +6,7 @@ import httpx
 import pytest
 from fastmcp.exceptions import ToolError
 
-from obsidian_multivault_mcp.client import ObsidianVaultClient
+from obsidian_multivault_mcp.client import NotFound, ObsidianVaultClient
 
 
 def make_client(handler, **overrides) -> ObsidianVaultClient:
@@ -102,13 +102,15 @@ class TestReadNote:
             await client.read_note("My Folder/My Note.md")
         assert seen["raw_path"] == "/vault/My%20Folder/My%20Note.md"
 
-    async def test_404_raises_toolerror(self):
+    async def test_404_raises_notfound(self):
         def handler(_request):
             return httpx.Response(404, json={"errorCode": 40400, "message": "File does not exist."})
 
         async with make_client(handler) as client:
-            with pytest.raises(ToolError) as exc_info:
+            with pytest.raises(NotFound) as exc_info:
                 await client.read_note("missing.md")
+        # NotFound is a ToolError subclass so existing handling still works.
+        assert isinstance(exc_info.value, ToolError)
         assert "Not found" in str(exc_info.value)
         assert "missing.md" in str(exc_info.value)
         assert "test" in str(exc_info.value)  # vault name in message
@@ -355,6 +357,19 @@ class TestConnectAndTimeoutErrors:
             with pytest.raises(ToolError) as exc_info:
                 await client.read_note("foo.md")
         assert "timed out" in str(exc_info.value)
+
+    async def test_other_request_error_maps_to_toolerror(self):
+        # A non-connect / non-timeout RequestError must not leak past _request —
+        # otherwise raw httpx exceptions break tool callers.
+        def handler(_request):
+            raise httpx.ReadError("connection reset")
+
+        async with make_client(handler) as client:
+            with pytest.raises(ToolError) as exc_info:
+                await client.read_note("foo.md")
+        msg = str(exc_info.value)
+        assert "Transport error" in msg
+        assert "ReadError" in msg
 
 
 class TestLifecycle:

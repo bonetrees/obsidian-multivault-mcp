@@ -106,12 +106,20 @@ tools for end-to-end coverage.
 
 ## HTTPS with self-signed certificates
 
-The plugin defaults to HTTPS on port 27124 with a self-signed cert. The
-client connects with `verify=False`, which is acceptable for localhost
-self-signed but means TLS is not verifying identity. The `.yaml`
-`scheme` field can be set to `"http"` if the plugin's insecure HTTP
-server (default port 27123) is enabled — but the plugin disables that by
-default and HTTPS is recommended.
+The plugin defaults to HTTPS on port 27124 with a self-signed cert.
+TLS verification is derived from the configured `host`:
+
+- **HTTPS to loopback** (`127.0.0.1`, `localhost`, `::1`) — client
+  connects with `verify=False`. The plugin's self-signed cert is
+  expected and can't be MITM'd on the loopback interface.
+- **HTTPS to any other host** — verification stays on. If you expose
+  the plugin off-localhost you're responsible for installing a
+  properly issued cert, and the client will refuse to fall back to an
+  unverified TLS session.
+
+The `.yaml` `scheme` field can be set to `"http"` if the plugin's
+insecure HTTP server (default port 27123) is enabled, but the plugin
+disables that by default and HTTPS is recommended.
 
 ## License
 

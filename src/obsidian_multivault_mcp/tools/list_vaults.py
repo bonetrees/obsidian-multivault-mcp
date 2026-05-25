@@ -5,6 +5,7 @@ import asyncio
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
 
+from ..client import NotFound
 from ..logging_config import setup_logging
 from ..server import get_all_clients, mcp
 from ._helpers import strip_frontmatter
@@ -20,13 +21,14 @@ async def _fetch_one_vault(name: str, client) -> dict:
         return {"name": name, "status": "unreachable", "index": None}
     try:
         raw = await client.read_note(_INDEX_FILENAME)
+    except NotFound:
+        # Index.md missing is the common case and is not an error worth
+        # surfacing — the vault is still online.
+        return {"name": name, "status": "online", "index": None}
     except ToolError as exc:
-        # Index.md missing is the common case (404) and is not an error worth
-        # surfacing — the vault is still online. Other errors (auth failure,
-        # method-not-allowed, …) get logged and reported as unreachable so the
-        # vault isn't quietly marked online while the LLM can't actually use it.
-        if "Not found" in str(exc):
-            return {"name": name, "status": "online", "index": None}
+        # Other errors (auth failure, method-not-allowed, transport, …) get
+        # logged and reported as unreachable so the vault isn't quietly marked
+        # online while the LLM can't actually use it.
         logger.warning("Vault %r status check passed but Index.md fetch failed: %s", name, exc)
         return {"name": name, "status": "unreachable", "index": None}
     body = strip_frontmatter(raw.get("content", "") or "")
