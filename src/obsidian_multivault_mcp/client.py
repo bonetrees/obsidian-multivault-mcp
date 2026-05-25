@@ -91,6 +91,22 @@ class ObsidianVaultClient:
             return {}
         return body if isinstance(body, dict) else {}
 
+    def _parse_json(self, response: httpx.Response, operation: str) -> Any:
+        """Parse a success-path response body and re-raise decode errors as ToolError.
+
+        Without this, a malformed 2xx body would surface as a raw
+        json.JSONDecodeError to tool callers, breaking the client's
+        "only ToolError escapes" contract.
+        """
+        try:
+            return response.json()
+        except (json.JSONDecodeError, ValueError) as exc:
+            snippet = response.text[:120] if response.text else "(empty body)"
+            raise ToolError(
+                f"Invalid JSON response from vault '{self.name}' during {operation}: "
+                f"{type(exc).__name__}: {exc}. Body started with: {snippet!r}"
+            ) from exc
+
     def _raise_for_status(
         self,
         response: httpx.Response,
@@ -192,7 +208,7 @@ class ObsidianVaultClient:
             headers={"Accept": "application/vnd.olrapi.note+json"},
         )
         self._raise_for_status(response, "read_note", path)
-        return response.json()
+        return self._parse_json(response, "read_note")
 
     async def write_note(self, path: str, content: str) -> None:
         response = await self._request(
@@ -249,8 +265,8 @@ class ObsidianVaultClient:
         url = f"/vault/{self._encode_path(path)}/" if path else "/vault/"
         response = await self._request("GET", url, operation="list_directory")
         self._raise_for_status(response, "list_directory", path)
-        body = response.json()
-        return list(body.get("files", []))
+        body = self._parse_json(response, "list_directory")
+        return list(body.get("files", []) if isinstance(body, dict) else [])
 
     async def search_simple(self, query: str, context_length: int) -> list[dict]:
         response = await self._request(
@@ -260,7 +276,7 @@ class ObsidianVaultClient:
             params={"query": query, "contextLength": context_length},
         )
         self._raise_for_status(response, "search_simple")
-        body = response.json()
+        body = self._parse_json(response, "search_simple")
         return body if isinstance(body, list) else []
 
     async def search_jsonlogic(self, query: dict) -> list[dict]:
@@ -272,7 +288,7 @@ class ObsidianVaultClient:
             headers={"Content-Type": "application/vnd.olrapi.jsonlogic+json"},
         )
         self._raise_for_status(response, "search_jsonlogic")
-        body = response.json()
+        body = self._parse_json(response, "search_jsonlogic")
         return body if isinstance(body, list) else []
 
     async def search_dataview(
@@ -298,5 +314,5 @@ class ObsidianVaultClient:
                 fallback = await self.search_simple(query, context_length)
                 return fallback, "Dataview not available, fell back to text search"
         self._raise_for_status(response, "search_dataview")
-        body = response.json()
+        body = self._parse_json(response, "search_dataview")
         return (body if isinstance(body, list) else []), None

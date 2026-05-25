@@ -389,6 +389,28 @@ class TestConnectAndTimeoutErrors:
         assert "ReadError" in msg
 
 
+class TestMalformedJsonSuccessResponse:
+    """A 2xx body that isn't valid JSON must map to ToolError, not a raw
+    JSONDecodeError. This keeps the client's "only ToolError escapes"
+    contract honest end-to-end."""
+
+    async def test_read_note_malformed_json(self):
+        def handler(_request):
+            return httpx.Response(
+                200,
+                text="<html>upstream proxy ate the body</html>",
+                headers={"content-type": "text/html"},
+            )
+
+        async with make_client(handler) as client:
+            with pytest.raises(ToolError) as exc_info:
+                await client.read_note("foo.md")
+        msg = str(exc_info.value)
+        assert "Invalid JSON response" in msg
+        assert "read_note" in msg
+        assert "test" in msg  # vault name in message
+
+
 class TestLifecycle:
     async def test_use_outside_async_with_raises(self):
         client = make_client(lambda req: httpx.Response(200))
