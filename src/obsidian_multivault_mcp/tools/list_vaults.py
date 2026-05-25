@@ -70,10 +70,13 @@ async def list_vaults(ctx: Context) -> dict:
           it}
         - `{path/to/another.md}` — {Description}
 
-    Vaults that respond to the health check show `status: "online"`;
-    unreachable vaults (Obsidian closed, plugin disabled, wrong port, …)
-    show `status: "unreachable"` with `index: None`. A vault with no
-    Index.md still appears with `index: None`.
+    `status: "online"` means the vault both passed the health check and
+    is actually usable for reads (`Index.md` returned 200 or was absent).
+    `status: "unreachable"` covers everything else — Obsidian closed,
+    plugin disabled, wrong port, authentication failure, transport
+    errors — all of which surface here so the LLM doesn't waste a tool
+    call on a vault it can't read from. A vault that's online but has
+    no `Index.md` still shows `status: "online"` with `index: None`.
 
     Filename is strict — only `Index.md` (capital I) is read.
     """

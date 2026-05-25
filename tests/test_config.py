@@ -54,6 +54,13 @@ class TestVerifySsl:
     def test_https_loopback_ipv6_disables_verify(self):
         assert self._make("https", "::1").verify_ssl is False
 
+    def test_https_bracketed_ipv6_loopback_disables_verify(self):
+        # __main__.py passes raw --host straight through; user might write
+        # "[::1]" since that's the URL form. _is_loopback_host has to
+        # normalise brackets so the bind warning behaves the same way
+        # config-loaded hosts do.
+        assert self._make("https", "[::1]").verify_ssl is False
+
     def test_https_loopback_range_disables_verify(self):
         # 127.0.0.0/8 is all loopback — Debian/Ubuntu put the system hostname
         # at 127.0.1.1, that should also skip verification.

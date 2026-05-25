@@ -25,9 +25,18 @@ def _is_loopback_host(host: str) -> bool:
     those should still be treated as loopback. ``localhost`` is special-
     cased because DNS resolution of that name happens later in httpx, not
     here; the match is case-insensitive since DNS names are.
+
+    Bracketed IPv6 literals (e.g. ``"[::1]"`` as accepted on the CLI or in
+    the OBSIDIAN_MCP_HOST env var) are normalized before parsing — config
+    loading already strips brackets for stored hosts, but callers that
+    pass user input directly need this guard too.
     """
     if host.lower() == "localhost":
         return True
+    # Accept both "::1" and "[::1]" — strip brackets if present so
+    # ipaddress.ip_address() can parse the literal.
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
     try:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
