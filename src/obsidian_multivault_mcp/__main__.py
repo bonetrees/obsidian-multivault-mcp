@@ -73,8 +73,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.config:
         os.environ["OBSIDIAN_MCP_CONFIG"] = args.config
 
-    host = args.host or os.environ.get("OBSIDIAN_MCP_HOST", "127.0.0.1")
-    port = args.port or _env_int("OBSIDIAN_MCP_PORT", 8100)
+    # `is not None` rather than `or`: --port 0 (or an explicit empty --host "")
+    # would otherwise fall through to the env/default. argparse stores None
+    # when the flag is omitted, so a falsy-but-set value is meaningful here.
+    host = args.host if args.host is not None else os.environ.get("OBSIDIAN_MCP_HOST", "127.0.0.1")
+    port = args.port if args.port is not None else _env_int("OBSIDIAN_MCP_PORT", 8100)
 
     # Reuse the project-wide loopback definition rather than maintaining a
     # parallel hardcoded list (which previously missed 127.0.0.0/8, IPv6

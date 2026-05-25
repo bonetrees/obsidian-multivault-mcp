@@ -53,7 +53,7 @@ tests/
 
 - **Multi-vault config.** YAML file path set via `OBSIDIAN_MCP_CONFIG` env var. Each vault entry has `scheme`, `host`, `port`, `api_key_env`. Keys never stored in YAML — `api_key_env` names the env var holding the key. Config loaded and validated at lifespan startup.
 
-- **HTTPS with self-signed certs.** Plugin defaults to HTTPS:27124 with self-signed cert. `VaultConfig.verify_ssl` derives from host: HTTPS to loopback (`127.0.0.1`, `localhost`, `::1`) → `verify=False` (the plugin's self-signed cert is expected and the loopback interface isn't MITM-able); HTTPS to anything else → `verify=True` so a misconfigured remote vault can't silently fall back to an unverified TLS session. Config `scheme` field defaults to `"https"`. The `LOOPBACK_HOSTS` set lives in `config.py`.
+- **HTTPS with self-signed certs.** Plugin defaults to HTTPS:27124 with self-signed cert. `VaultConfig.verify_ssl` derives from host via the `_is_loopback_host` helper in `config.py`: HTTPS to loopback (any 127.0.0.0/8 IPv4, `::1`, or case-insensitive `localhost`) → `verify=False` (the plugin's self-signed cert is expected and the loopback interface isn't MITM-able); HTTPS to anything else → `verify=True` so a misconfigured remote vault can't silently fall back to an unverified TLS session. Loopback detection uses `ipaddress.ip_address(host).is_loopback` for IP literals so the whole 127.0.0.0/8 range (e.g. Debian's `127.0.1.1`) works, not just `127.0.0.1`. The same helper is reused by `__main__.py`'s non-loopback bind warning. Config `scheme` field defaults to `"https"`.
 
 - **Client per vault.** One `ObsidianVaultClient` instance per configured vault, stored in `dict[str, ObsidianVaultClient]`. Created in lifespan via `AsyncExitStack`. Base URL: `f"{scheme}://{host}:{port}"`.
 
@@ -73,7 +73,7 @@ tests/
 
 - **Error handling.** The client does *not* use `httpx.raise_for_status` / `HTTPStatusError`. Instead, every response goes through `_raise_for_status()` which parses the API error body `{"message": str, "errorCode": int}` and raises `ToolError` (or its `NotFound` subclass for HTTP 404). Transport-layer exceptions are caught in `_request()`: `ConnectError`, `ConnectTimeout`, generic `TimeoutException`, and a `RequestError` catch-all all map to `ToolError` with vault + operation context — nothing httpx-shaped leaks past the client. Never return `{"error": ...}` dicts.
 
-- **Curator: frontmatter stripping.** Raw API `content` includes YAML frontmatter fences. Curator regex `^---\n.*?---\n` (with `re.DOTALL`) strips the leading block including both fences; empty frontmatter (`---\n---\n`) is also stripped. Malformed/unterminated blocks pass through unchanged.
+- **Curator: frontmatter stripping.** Raw API `content` includes YAML frontmatter fences. Curator regex `^---\n(?:.*?\n)?---(?:\n|\Z)` (with `re.DOTALL`) strips the leading block including both fences. The `\n` prefix on the closing fence requires it to be on its own line — without it, a YAML value containing literal dashes (e.g. `description: "test --- here"`) could prematurely terminate the block. The optional `(?:.*?\n)?` allows empty frontmatter (`---\n---\n`). The `\Z` alternative accepts notes that end exactly at the closing fence with no trailing newline. Malformed/unterminated blocks pass through unchanged.
 
 - **Curator: directory listing.** API returns single `files` array. Entries ending with `/` are folders (strip trailing slash). Others are files.
 

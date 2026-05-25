@@ -2,7 +2,7 @@
 
 import pytest
 
-from obsidian_multivault_mcp.__main__ import _env_int
+from obsidian_multivault_mcp.__main__ import _env_int, _parse_args
 
 
 class TestEnvInt:
@@ -28,3 +28,16 @@ class TestEnvInt:
         assert "OBSIDIAN_MCP_PORT" in msg
         assert "not-a-port" in msg
         assert "integer" in msg
+
+
+class TestArgsZeroValuesPreserved:
+    """argparse stores None when the flag is omitted; --port 0 means "0",
+    not "use default". The earlier `or` shortcut would have masked it."""
+
+    def test_port_zero_parsed_as_int(self):
+        args = _parse_args(["--port", "0"])
+        assert args.port == 0  # not None, not falsy-replaced
+
+    def test_port_omitted_is_none(self):
+        args = _parse_args([])
+        assert args.port is None
