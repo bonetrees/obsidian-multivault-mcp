@@ -115,6 +115,16 @@ class TestLoadConfigValidation:
         with pytest.raises(RuntimeError, match="whitespace"):
             load_config(path)
 
+    def test_directory_path_rejected(self, tmp_path):
+        # Pointing OBSIDIAN_MCP_CONFIG at a directory should fail with a
+        # clear message — not a raw IsADirectoryError from open().
+        with pytest.raises(RuntimeError, match="not a regular file"):
+            load_config(tmp_path)
+
+    def test_missing_file_reported(self, tmp_path):
+        with pytest.raises(RuntimeError, match="not found"):
+            load_config(tmp_path / "nope.yaml")
+
     def test_happy_path(self, tmp_path, monkeypatch):
         monkeypatch.setenv("OBSIDIAN_VAULT_API_KEY", "k")
         path = _write_config(

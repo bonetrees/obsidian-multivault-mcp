@@ -51,7 +51,14 @@ class Config:
 # pylint: disable-next=too-many-branches
 def load_config(path: str | os.PathLike | None = None) -> Config:
     config_path = Path(path or os.environ.get("OBSIDIAN_MCP_CONFIG", DEFAULT_CONFIG_PATH))
-    if not config_path.exists():
+    # is_file() rather than exists() — Path("") resolves to cwd which exists but
+    # isn't readable as a YAML file; a directory path would also pass exists().
+    if not config_path.is_file():
+        if config_path.exists():
+            raise RuntimeError(
+                f"Config path {config_path} is not a regular file. "
+                "Set OBSIDIAN_MCP_CONFIG to a YAML file path."
+            )
         raise RuntimeError(
             f"Config file not found: {config_path}. " "Set OBSIDIAN_MCP_CONFIG or create the file."
         )
@@ -60,6 +67,9 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
             raw = yaml.safe_load(fh)
     except yaml.YAMLError as exc:
         raise RuntimeError(f"Config file {config_path} is not valid YAML: {exc}") from exc
+    except OSError as exc:
+        # PermissionError, IsADirectoryError on weird race, decoding errors, …
+        raise RuntimeError(f"Could not read config file {config_path}: {exc}") from exc
 
     if not isinstance(raw, dict) or "vaults" not in raw:
         raise RuntimeError(f"Config file {config_path} missing top-level 'vaults' key.")

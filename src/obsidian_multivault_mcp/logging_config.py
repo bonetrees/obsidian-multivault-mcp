@@ -17,10 +17,27 @@ PACKAGE_LOGGER_NAME = "obsidian-multivault-mcp"
 _CONFIGURED = False
 
 
+def _resolve_level(raw: str) -> int:
+    """Map a string level to the int constant. Unknown values fall back to INFO."""
+    # logging._nameToLevel exists on every supported Python; getLevelNamesMapping
+    # is 3.11+. Use the underscore name for back-compat and treat it as stable.
+    mapping = logging.getLevelNamesMapping()
+    resolved = mapping.get(raw.upper())
+    if resolved is None:
+        # Don't crash the server over a mis-set env var. Use stderr directly
+        # since the package logger we're configuring isn't ready yet.
+        sys.stderr.write(
+            f"obsidian-multivault-mcp: unknown OBSIDIAN_MCP_LOG_LEVEL={raw!r}, "
+            f"falling back to INFO.\n"
+        )
+        return logging.INFO
+    return resolved
+
+
 def setup_logging(name: str) -> logging.Logger:
     global _CONFIGURED  # pylint: disable=global-statement
     if not _CONFIGURED:
-        level = os.environ.get("OBSIDIAN_MCP_LOG_LEVEL", "INFO").upper()
+        level = _resolve_level(os.environ.get("OBSIDIAN_MCP_LOG_LEVEL", "INFO"))
         handler = logging.StreamHandler(stream=sys.stderr)
         handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s"))
         pkg_logger = logging.getLogger(PACKAGE_LOGGER_NAME)
