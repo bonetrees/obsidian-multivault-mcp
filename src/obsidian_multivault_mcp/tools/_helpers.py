@@ -3,7 +3,11 @@
 import re
 from datetime import datetime, timezone
 
-_FRONTMATTER_RE = re.compile(r"^---\n.*?---\n", re.DOTALL)
+# Closing fence may be followed by \n (normal body follows) or by end-of-string
+# (note ends with the frontmatter block — valid Markdown, surprisingly common
+# for stub notes). Without the \Z alternative the regex would leak the raw
+# block into `content` / `index`.
+_FRONTMATTER_RE = re.compile(r"^---\n.*?---(?:\n|\Z)", re.DOTALL)
 
 
 def strip_frontmatter(content: str) -> str:

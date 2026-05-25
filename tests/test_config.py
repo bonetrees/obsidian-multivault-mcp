@@ -49,10 +49,21 @@ class TestVerifySsl:
     def test_https_loopback_ipv6_disables_verify(self):
         assert self._make("https", "::1").verify_ssl is False
 
+    def test_https_loopback_range_disables_verify(self):
+        # 127.0.0.0/8 is all loopback — Debian/Ubuntu put the system hostname
+        # at 127.0.1.1, that should also skip verification.
+        assert self._make("https", "127.0.1.1").verify_ssl is False
+        assert self._make("https", "127.5.5.5").verify_ssl is False
+
     def test_https_non_loopback_keeps_verify(self):
         # Non-loopback HTTPS must verify — protect against accidental MITM
         # if someone exposes the plugin beyond localhost.
         assert self._make("https", "10.0.0.5").verify_ssl is True
+
+    def test_https_dns_name_keeps_verify(self):
+        # DNS names other than 'localhost' aren't loopback as far as we can
+        # tell without resolving them — keep verification on.
+        assert self._make("https", "vault.example.com").verify_ssl is True
 
     def test_http_returns_verify_true_irrelevant(self):
         # HTTP has no TLS; the flag is irrelevant, but we return True for cleanliness.
@@ -249,7 +260,7 @@ class TestLoadConfigValidation:
 
     def test_bracketed_ipv6_normalised_to_unbracketed(self, tmp_path, monkeypatch):
         # User writes "[::1]" in YAML (URL form). Canonical storage strips
-        # the brackets so LOOPBACK_HOSTS matching ("::1") still works.
+        # the brackets so ipaddress.ip_address() can parse it for loopback.
         monkeypatch.setenv("OBSIDIAN_VAULT_API_KEY", "k")
         path = _write_config(
             tmp_path,

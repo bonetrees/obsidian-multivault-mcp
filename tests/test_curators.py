@@ -28,6 +28,13 @@ class TestStripFrontmatter:
         content = "---\nkey: value\n---\n"
         assert strip_frontmatter(content) == ""
 
+    def test_frontmatter_ending_at_eof_without_newline(self):
+        # Note ends with the closing fence and no trailing newline. Valid
+        # Markdown — common for stub / placeholder notes. The block still
+        # needs to be stripped so it doesn't leak into curated `content`.
+        content = "---\nkey: value\n---"
+        assert strip_frontmatter(content) == ""
+
     def test_malformed_unterminated_passthrough(self):
         content = "---\nkey: value\nno closing fence"
         assert strip_frontmatter(content) == content

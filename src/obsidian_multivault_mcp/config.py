@@ -14,11 +14,26 @@ logger = setup_logging("obsidian-multivault-mcp.config")
 
 DEFAULT_CONFIG_PATH = "./obsidian-multivault-mcp-config.yaml"
 
-# Hosts where TLS verification is disabled by default because the plugin
-# ships a self-signed cert and the connection cannot be MITM'd in practice.
-# For any other host we keep verification on so a misconfigured remote
-# vault doesn't silently fall back to an unverified TLS session.
-LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+def _is_loopback_host(host: str) -> bool:
+    """True if `host` resolves to the loopback range. Used to decide whether
+    TLS verification can safely be skipped (loopback can't be MITM'd in
+    practice and the plugin ships a self-signed cert).
+
+    Covers all of 127.0.0.0/8 and ::1, not just the canonical 127.0.0.1 —
+    distros like Debian/Ubuntu put the system hostname at 127.0.1.1 and
+    those should still be treated as loopback. ``localhost`` is special-
+    cased because DNS resolution of that name happens later in httpx, not
+    here.
+    """
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        # Not an IP literal — treat as a regular DNS name.
+        return False
+
 
 # Bare DNS labels per RFC 1123: alphanumerics and hyphens, dots between labels,
 # no leading/trailing hyphen on any label. Used to validate host strings that
@@ -92,7 +107,7 @@ class VaultConfig:
         # HTTPS to loopback: the plugin uses a self-signed cert, so verification has to
         # be off. HTTPS to any non-loopback host: leave verification on — the user must
         # have a properly issued cert if they exposed the plugin off-localhost.
-        return self.host not in LOOPBACK_HOSTS
+        return not _is_loopback_host(self.host)
 
 
 @dataclass(frozen=True)
@@ -155,8 +170,8 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
                 f"Vault '{name}' host must not have leading or trailing whitespace, got: {host!r}."
             )
         # Strip surrounding brackets if the user wrote an IPv6 literal in URL
-        # form (e.g. "[::1]"). Canonical storage is unbracketed so loopback
-        # matching against LOOPBACK_HOSTS works regardless of input style.
+        # form (e.g. "[::1]"). Canonical storage is unbracketed so
+        # ipaddress.ip_address() can parse it for loopback detection.
         if host.startswith("[") and host.endswith("]"):
             host = host[1:-1]
             if not host:
