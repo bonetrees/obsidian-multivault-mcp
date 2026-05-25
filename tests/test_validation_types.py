@@ -39,6 +39,14 @@ class TestVaultName:
         with pytest.raises(ValidationError):
             self.adapter.validate_python("devprojects ")
 
+    def test_non_string_rejected(self):
+        # BeforeValidator runs before Pydantic's lax str coercion would
+        # otherwise turn 123 into "123".
+        with pytest.raises(ValidationError):
+            self.adapter.validate_python(123)
+        with pytest.raises(ValidationError):
+            self.adapter.validate_python(None)
+
 
 class TestVaultPath:
     adapter = TypeAdapter(VaultPath)
@@ -89,6 +97,10 @@ class TestVaultPath:
     def test_trailing_whitespace_rejected(self):
         with pytest.raises(ValidationError):
             self.adapter.validate_python("notes/foo.md ")
+
+    def test_non_string_rejected(self):
+        with pytest.raises(ValidationError):
+            self.adapter.validate_python(42)
 
 
 class TestVaultFilePath:

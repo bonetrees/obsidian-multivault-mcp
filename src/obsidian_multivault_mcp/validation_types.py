@@ -1,42 +1,52 @@
-"""Pydantic-annotated types used for tool input validation."""
+"""Pydantic-annotated types used for tool input validation.
+
+The string validators below run as BeforeValidators so they see the raw
+input *before* Pydantic's lax-mode str coercion — without that, an int
+like ``123`` would get silently coerced to ``"123"`` and slip past the
+``isinstance(value, str)`` check.
+"""
 
 from typing import Annotated, Literal
 
 from pydantic import AfterValidator, BeforeValidator
 
 
-def validate_vault_name(value: str) -> str:
+def _require_str(label: str, value: object) -> str:
     if not isinstance(value, str):
-        raise ValueError("vault name must be a string")
-    if not value or not value.strip():
-        raise ValueError("vault name must be non-empty")
-    if value.strip() != value:
-        raise ValueError("vault name must not have leading or trailing whitespace")
+        raise ValueError(f"{label} must be a string, got {type(value).__name__}: {value!r}")
     return value
 
 
-def validate_vault_path(value: str) -> str:
+def validate_vault_name(value: object) -> str:
+    name = _require_str("vault name", value)
+    if not name or not name.strip():
+        raise ValueError("vault name must be non-empty")
+    if name.strip() != name:
+        raise ValueError("vault name must not have leading or trailing whitespace")
+    return name
+
+
+def validate_vault_path(value: object) -> str:
     """Vault path that allows the root (empty string / single slash).
 
     Used for directory-oriented tools like list_directory where the root
     is a meaningful target. Note tools should use VaultFilePath instead.
     """
-    if not isinstance(value, str):
-        raise ValueError("path must be a string")
-    if "\x00" in value:
+    path = _require_str("path", value)
+    if "\x00" in path:
         raise ValueError("path must not contain null bytes")
-    if value.strip() != value:
-        raise ValueError(f"path must not have leading or trailing whitespace: {value!r}")
-    cleaned = value.strip("/")
+    if path.strip() != path:
+        raise ValueError(f"path must not have leading or trailing whitespace: {path!r}")
+    cleaned = path.strip("/")
     if not cleaned:
         return ""
     for seg in cleaned.split("/"):
         if seg in ("", "..", "."):
-            raise ValueError(f"path must not contain empty, '.' or '..' segments: {value!r}")
+            raise ValueError(f"path must not contain empty, '.' or '..' segments: {path!r}")
     return cleaned
 
 
-def validate_vault_file_path(value: str) -> str:
+def validate_vault_file_path(value: object) -> str:
     """Vault path that must point to a file (root not allowed).
 
     Used for read/write/append/patch/delete note tools — calling them
@@ -70,9 +80,12 @@ def clamp_context_length(value: int) -> int:
     return max(20, min(500, value))
 
 
-VaultName = Annotated[str, AfterValidator(validate_vault_name)]
-VaultPath = Annotated[str, AfterValidator(validate_vault_path)]
-VaultFilePath = Annotated[str, AfterValidator(validate_vault_file_path)]
+# BeforeValidator on the str validators so non-str inputs (e.g. 123) are
+# rejected before Pydantic coerces them to str. AfterValidator would receive
+# the already-coerced "123" and pass the isinstance check incorrectly.
+VaultName = Annotated[str, BeforeValidator(validate_vault_name)]
+VaultPath = Annotated[str, BeforeValidator(validate_vault_path)]
+VaultFilePath = Annotated[str, BeforeValidator(validate_vault_file_path)]
 PatchOperation = Literal["append", "prepend", "replace"]
 PatchTargetType = Literal["heading", "block-reference", "frontmatter-key"]
 SearchType = Literal["text", "jsonlogic", "dataview"]

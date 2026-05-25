@@ -134,11 +134,23 @@ class ObsidianVaultClient:
         try:
             return await http.request(method, url, **kwargs)
         except httpx.ConnectError as exc:
+            # Network-level failures (refused, no route, DNS). Note that
+            # ConnectTimeout is a TimeoutException, NOT a ConnectError, so it
+            # is handled by the more-specific timeout branch below.
             raise ToolError(
                 f"Cannot connect to vault '{self.name}' at {self.base_url}. "
                 f"Is Obsidian running with the Local REST API plugin enabled? ({exc})"
             ) from exc
+        except httpx.ConnectTimeout as exc:
+            # Connection establishment timed out — the relevant timeout is the
+            # connect timeout, not the overall request timeout. Reporting the
+            # wrong number sends operators looking in the wrong place.
+            raise ToolError(
+                f"Connection to vault '{self.name}' timed out after "
+                f"{self.CONNECT_TIMEOUT}s during {operation}. ({exc})"
+            ) from exc
         except httpx.TimeoutException as exc:
+            # Read / write / pool timeout — bounded by the overall request timeout.
             raise ToolError(
                 f"Request to vault '{self.name}' timed out after {self._timeout}s "
                 f"during {operation}. ({exc})"

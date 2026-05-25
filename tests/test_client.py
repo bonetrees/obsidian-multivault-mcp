@@ -349,14 +349,31 @@ class TestConnectAndTimeoutErrors:
         assert "Cannot connect" in str(exc_info.value)
         assert "Local REST API" in str(exc_info.value)
 
-    async def test_timeout_maps_to_toolerror(self):
+    async def test_read_timeout_reports_request_timeout(self):
         def handler(_request):
             raise httpx.ReadTimeout("slow")
 
-        async with make_client(handler) as client:
+        async with make_client(handler, timeout=30.0) as client:
             with pytest.raises(ToolError) as exc_info:
                 await client.read_note("foo.md")
-        assert "timed out" in str(exc_info.value)
+        msg = str(exc_info.value)
+        assert "timed out after 30" in msg
+        assert "Request" in msg
+
+    async def test_connect_timeout_reports_connect_timeout(self):
+        # ConnectTimeout is a TimeoutException, not a ConnectError. The
+        # error message should reference CONNECT_TIMEOUT (10s), not the
+        # overall request timeout.
+        def handler(_request):
+            raise httpx.ConnectTimeout("slow connect")
+
+        async with make_client(handler, timeout=30.0) as client:
+            with pytest.raises(ToolError) as exc_info:
+                await client.read_note("foo.md")
+        msg = str(exc_info.value)
+        assert "Connection" in msg
+        assert "10" in msg  # the CONNECT_TIMEOUT
+        assert "30" not in msg  # not the wrong overall timeout
 
     async def test_other_request_error_maps_to_toolerror(self):
         # A non-connect / non-timeout RequestError must not leak past _request —
