@@ -38,6 +38,30 @@ class TestVerifySsl:
         assert self._make("http", "127.0.0.1").verify_ssl is True
 
 
+class TestBaseUrl:
+    """Base URLs must bracket IPv6 literals per RFC 3986."""
+
+    def _make(self, host):
+        return VaultConfig(name="v", scheme="https", host=host, port=27124, api_key="k")
+
+    def test_ipv4(self):
+        assert self._make("127.0.0.1").base_url == "https://127.0.0.1:27124"
+
+    def test_dns_name(self):
+        assert self._make("vault.example.com").base_url == "https://vault.example.com:27124"
+
+    def test_ipv6_loopback_bracketed(self):
+        # ::1 must turn into [::1] in the URL, otherwise httpx parses
+        # "::1:27124" as host=":" port="1:27124" and the connect fails.
+        assert self._make("::1").base_url == "https://[::1]:27124"
+
+    def test_ipv6_full_bracketed(self):
+        assert (
+            self._make("fe80::1ff:fe23:4567:890a").base_url
+            == "https://[fe80::1ff:fe23:4567:890a]:27124"
+        )
+
+
 class TestLoadConfigValidation:
     """Reject (don't silently strip) surrounding whitespace on stringly fields."""
 
@@ -124,6 +148,29 @@ class TestLoadConfigValidation:
     def test_missing_file_reported(self, tmp_path):
         with pytest.raises(RuntimeError, match="not found"):
             load_config(tmp_path / "nope.yaml")
+
+    def test_bracketed_ipv6_normalised_to_unbracketed(self, tmp_path, monkeypatch):
+        # User writes "[::1]" in YAML (URL form). Canonical storage strips
+        # the brackets so LOOPBACK_HOSTS matching ("::1") still works.
+        monkeypatch.setenv("OBSIDIAN_VAULT_API_KEY", "k")
+        path = _write_config(
+            tmp_path,
+            textwrap.dedent(
+                """\
+                vaults:
+                  v:
+                    scheme: "https"
+                    host: "[::1]"
+                    port: 27124
+                    api_key_env: "OBSIDIAN_VAULT_API_KEY"
+                """
+            ),
+        )
+        cfg = load_config(path)
+        v = cfg.vaults["v"]
+        assert v.host == "::1"  # stored canonical
+        assert v.base_url == "https://[::1]:27124"  # bracketed in URL
+        assert v.verify_ssl is False  # loopback HTTPS → verify off
 
     def test_happy_path(self, tmp_path, monkeypatch):
         monkeypatch.setenv("OBSIDIAN_VAULT_API_KEY", "k")

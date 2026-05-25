@@ -29,7 +29,12 @@ class VaultConfig:
 
     @property
     def base_url(self) -> str:
-        return f"{self.scheme}://{self.host}:{self.port}"
+        # IPv6 literals must be bracketed in URLs (RFC 3986). Detect by the
+        # presence of ':' in the host. Already-bracketed hosts are normalised
+        # away at load time so we can rely on the unbracketed canonical form
+        # here. IPv4 dotted-quads and DNS names never contain ':'.
+        host = f"[{self.host}]" if ":" in self.host else self.host
+        return f"{self.scheme}://{host}:{self.port}"
 
     @property
     def verify_ssl(self) -> bool:
@@ -48,7 +53,7 @@ class Config:
     path: Path
 
 
-# pylint: disable-next=too-many-branches
+# pylint: disable-next=too-many-branches,too-many-statements
 def load_config(path: str | os.PathLike | None = None) -> Config:
     config_path = Path(path or os.environ.get("OBSIDIAN_MCP_CONFIG", DEFAULT_CONFIG_PATH))
     # is_file() rather than exists() — Path("") resolves to cwd which exists but
@@ -101,6 +106,13 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
             raise RuntimeError(
                 f"Vault '{name}' host must not have leading or trailing whitespace, got: {host!r}."
             )
+        # Strip surrounding brackets if the user wrote an IPv6 literal in URL
+        # form (e.g. "[::1]"). Canonical storage is unbracketed so loopback
+        # matching against LOOPBACK_HOSTS works regardless of input style.
+        if host.startswith("[") and host.endswith("]"):
+            host = host[1:-1]
+            if not host:
+                raise RuntimeError(f"Vault '{name}' host must not be empty brackets.")
 
         port = entry.get("port")
         # bool is a subclass of int in Python, so isinstance(True, int) is True.
