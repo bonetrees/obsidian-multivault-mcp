@@ -3,7 +3,7 @@
 import ipaddress
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
@@ -71,7 +71,9 @@ class VaultConfig:
     scheme: str
     host: str
     port: int
-    api_key: str
+    # repr=False so an accidental print/log of a VaultConfig doesn't leak the
+    # bearer token. The value is still equality-checked and hashable normally.
+    api_key: str = field(repr=False)
 
     @property
     def base_url(self) -> str:

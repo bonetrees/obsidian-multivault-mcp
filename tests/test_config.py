@@ -13,6 +13,27 @@ def _write_config(tmp_path, body: str):
     return path
 
 
+class TestApiKeyRepr:
+    """Bearer token must not appear in str/repr — otherwise an accidental
+    log or debug print leaks it."""
+
+    def test_repr_omits_api_key(self):
+        cfg = VaultConfig(
+            name="v",
+            scheme="https",
+            host="127.0.0.1",
+            port=27124,
+            api_key="super-secret-token",
+        )
+        assert "super-secret-token" not in repr(cfg)
+        assert "super-secret-token" not in str(cfg)
+
+    def test_api_key_still_accessible(self):
+        # repr=False on the field, not stored differently — value still works.
+        cfg = VaultConfig(name="v", scheme="https", host="127.0.0.1", port=27124, api_key="abc")
+        assert cfg.api_key == "abc"
+
+
 class TestVerifySsl:
     """verify_ssl is derived: only HTTPS-to-loopback disables verification."""
 

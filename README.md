@@ -95,7 +95,7 @@ poetry run python -m obsidian_multivault_mcp --config ./other.yaml    # custom c
 ## Development
 
 ```bash
-poetry run pytest tests/ -v          # 101 tests, fast (~0.1 s)
+poetry run pytest tests/ -v          # full suite, runs in well under a second
 poetry run black src/ tests/         # format
 poetry run pylint src/obsidian_multivault_mcp/   # 10/10
 ```

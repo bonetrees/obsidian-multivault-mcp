@@ -128,6 +128,26 @@ Both `append_note` (POST) and `patch_note` with `operation: "append"` do not add
 
 All client tests use `httpx.MockTransport`. Each REST API method gets its own mock handler matching the method + path pattern. For multi-vault tests, create separate mock transports per vault.
 
+## Manual Smoke Checklist
+
+The automated test suite mocks every HTTP exchange. A handful of assumptions are only verifiable against a real `obsidian-local-rest-api` plugin instance — run this checklist against a live vault before tagging a release or after any change to `client.py` / search dispatch:
+
+1. **Bring up a vault.** Open Obsidian, install the Local REST API plugin, generate an API key, point a `obsidian-multivault-mcp-config.yaml` at the vault and the env var.
+2. **Start the server** in stdio for direct shell testing or streamable-http for MCP client testing:
+   ```bash
+   poetry run python -m obsidian_multivault_mcp --transport stdio
+   ```
+3. **`list_vaults`** — confirm vault appears with `status: "online"` and `index` populated from `Index.md` (or `None` if the file isn't there, not unreachable).
+4. **`read_note`** on a note with frontmatter — confirm `content` has the `---` block stripped, `frontmatter` is a parsed dict, `tags` includes both frontmatter and inline `#tag` references, `stat.created` / `stat.modified` are ISO 8601 strings. This exercises the `Accept: application/vnd.olrapi.note+json` header which the test suite can't validate end-to-end.
+5. **`patch_note`** with `target_type="heading"`, `target="Parent::Child"` — confirm the right heading is targeted. This exercises the URL-encoded `Target` header round-trip (`Parent%3A%3AChild` → plugin URL-decodes → matches), which is one of the more fragile contract points.
+6. **`write_note`** then **`append_note`** then **`delete_note`** — full destructive round-trip against a throwaway file. Confirm `delete_note` actually requires `confirm: true` (Pydantic schema should still accept `confirm: false` and the runtime gate should reject).
+7. **`search_vault`** with `search_type="text"` — confirm `results[].context` strings are populated.
+8. **`search_vault`** with `search_type="jsonlogic"` and a real expression like `{"in": ["#project", {"var": "tags"}]}` — confirm matches.
+9. **`search_vault`** with `search_type="dataview"` in a vault **with** Dataview installed — confirm `warning` is `None`. In a vault **without** Dataview — confirm `warning` is `"Dataview not available, fell back to text search"` and results come from the text search fallback.
+10. **`search_all_vaults`** with two vaults configured, one offline — confirm the online one returns results and the offline one shows `status: "error"` with a connection error, not a whole-tool failure.
+
+If any of these diverges from the docs, the mock-based tests are lying. Open an issue with the actual response shape and update the relevant curator / handler.
+
 ## Adding a Tool
 
 1. Create `src/obsidian_multivault_mcp/tools/new_tool.py`

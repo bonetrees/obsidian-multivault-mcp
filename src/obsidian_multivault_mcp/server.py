@@ -1,20 +1,32 @@
 """FastMCP server instance, lifespan, and client accessors."""
 
 from contextlib import AsyncExitStack, asynccontextmanager
-from typing import AsyncIterator
+from typing import AsyncIterator, TypedDict, cast
 
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
 from .client import ObsidianVaultClient
-from .config import load_config
+from .config import Config, load_config
 from .logging_config import setup_logging
 
 logger = setup_logging("obsidian-multivault-mcp.server")
 
 
+class LifespanContext(TypedDict):
+    """Shape of the dict yielded by obsidian_lifespan.
+
+    Centralised here so accessors don't index a generic dict with string
+    keys — a typo in get_client / get_all_clients would otherwise only
+    surface at tool-invocation time.
+    """
+
+    clients: dict[str, ObsidianVaultClient]
+    config: Config
+
+
 @asynccontextmanager
-async def obsidian_lifespan(_server: FastMCP) -> AsyncIterator[dict]:
+async def obsidian_lifespan(_server: FastMCP) -> AsyncIterator[LifespanContext]:
     config = load_config()
     clients: dict[str, ObsidianVaultClient] = {}
     async with AsyncExitStack() as stack:
@@ -43,8 +55,14 @@ async def obsidian_lifespan(_server: FastMCP) -> AsyncIterator[dict]:
 mcp = FastMCP(name="obsidian-multivault-mcp", lifespan=obsidian_lifespan)
 
 
+def _lifespan_context(ctx: Context) -> LifespanContext:
+    # FastMCP types lifespan_context as Any. Narrow once here so call sites
+    # benefit from the LifespanContext TypedDict.
+    return cast(LifespanContext, ctx.request_context.lifespan_context)
+
+
 def get_client(ctx: Context, vault: str) -> ObsidianVaultClient:
-    clients: dict[str, ObsidianVaultClient] = ctx.request_context.lifespan_context["clients"]
+    clients = _lifespan_context(ctx)["clients"]
     if vault not in clients:
         available = ", ".join(sorted(clients.keys())) or "(none configured)"
         raise ToolError(f"Unknown vault '{vault}'. Available vaults: {available}.")
@@ -52,4 +70,4 @@ def get_client(ctx: Context, vault: str) -> ObsidianVaultClient:
 
 
 def get_all_clients(ctx: Context) -> dict[str, ObsidianVaultClient]:
-    return ctx.request_context.lifespan_context["clients"]
+    return _lifespan_context(ctx)["clients"]
