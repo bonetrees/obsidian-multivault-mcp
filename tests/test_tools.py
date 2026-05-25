@@ -331,6 +331,19 @@ class TestSearchVault:
         )
         assert data["results"] == [{"path": "b.md", "score": None, "context": []}]
 
+    async def test_jsonlogic_non_object_root_raises(self, mcp_client):
+        # JsonLogic expressions are objects; parsing "[]" succeeds but isn't
+        # a valid expression — caller should get a clear self-correcting error.
+        with pytest.raises(ToolError) as exc_info:
+            await _call(
+                mcp_client,
+                "search_vault",
+                {"vault": "v", "query": "[]", "search_type": "jsonlogic"},
+            )
+        msg = str(exc_info.value)
+        assert "JSON object" in msg
+        assert "list" in msg  # type name of the bad root
+
     async def test_jsonlogic_bad_json_raises(self, mcp_client):
         with pytest.raises(ToolError) as exc_info:
             await _call(
