@@ -1,32 +1,18 @@
 """Shared test fixtures: tool auto-import, mock vault clients, in-process MCP client."""
 
-import importlib
-import pkgutil
 from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 
 import httpx
 import pytest
 
-
-# Auto-import every tool module so each @mcp.tool() decoration runs and
-# registers on the singleton FastMCP instance. Mirrors what __main__.py
-# does in production.
-def _auto_import_tools() -> None:
-    from obsidian_multivault_mcp import tools as tools_pkg
-
-    for _finder, modname, _ in pkgutil.iter_modules(tools_pkg.__path__):
-        if modname.startswith("_"):
-            continue
-        importlib.import_module(f"{tools_pkg.__name__}.{modname}")
-
-
-_auto_import_tools()
-
-
-from obsidian_multivault_mcp import server as server_module  # noqa: E402
-from obsidian_multivault_mcp.client import ObsidianVaultClient  # noqa: E402
-from obsidian_multivault_mcp.config import Config, VaultConfig  # noqa: E402
+# Importing the tools package runs pkgutil auto-discovery in its __init__.py,
+# which fires every @mcp.tool() decoration and registers them on the
+# singleton FastMCP instance. Same path production code takes via __main__.py.
+import obsidian_multivault_mcp.tools  # noqa: F401
+from obsidian_multivault_mcp import server as server_module
+from obsidian_multivault_mcp.client import ObsidianVaultClient
+from obsidian_multivault_mcp.config import Config, VaultConfig
 
 
 def make_mock_vault_client(name: str, handler) -> ObsidianVaultClient:

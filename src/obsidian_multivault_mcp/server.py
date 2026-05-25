@@ -27,8 +27,11 @@ async def obsidian_lifespan(_server: FastMCP) -> AsyncIterator[dict]:
             )
             await stack.enter_async_context(client)
             clients[name] = client
+            # __aenter__ only constructs the httpx.AsyncClient; it does not
+            # verify connectivity. Actual reachability is checked lazily by
+            # tools that call get_status() (e.g. list_vaults).
             logger.info(
-                "Connected to vault %s at %s:%s",
+                "Initialized client for vault %s at %s:%s",
                 name,
                 vault_cfg.host,
                 vault_cfg.port,
