@@ -20,7 +20,9 @@ def validate_vault_path(value: str) -> str:
         raise ValueError("path must be a string")
     if "\x00" in value:
         raise ValueError("path must not contain null bytes")
-    cleaned = value.strip().strip("/")
+    if value.strip() != value:
+        raise ValueError(f"path must not have leading or trailing whitespace: {value!r}")
+    cleaned = value.strip("/")
     if not cleaned:
         return ""
     for seg in cleaned.split("/"):

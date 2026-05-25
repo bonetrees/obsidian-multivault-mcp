@@ -108,6 +108,29 @@ class TestListVaults:
         assert by_name["gamma"]["index"] is None
 
 
+class TestListVaultsAuthFailureNotSwallowed:
+    """A vault that passes health check but returns 401 on Index.md must NOT
+    be reported as online — that would lie to the LLM about usability."""
+
+    @pytest.fixture
+    def vault_handlers(self):
+        def vault(request):
+            if request.url.path == "/":
+                return _ok({"status": "OK"})
+            if request.url.path == "/vault/Index.md":
+                return httpx.Response(401, json={"errorCode": 40100, "message": "bad key"})
+            return httpx.Response(404)
+
+        return {"v": vault}
+
+    async def test_marks_unreachable_on_auth_failure(self, mcp_client):
+        data = await _call(mcp_client, "list_vaults", {})
+        entry = data["vaults"][0]
+        assert entry["name"] == "v"
+        assert entry["status"] == "unreachable"
+        assert entry["index"] is None
+
+
 # ---------- list_directory ----------
 
 
@@ -396,6 +419,31 @@ class TestSearchAllVaults:
         assert rbv["broken"]["status"] == "error"
         assert rbv["broken"]["total_results"] == 0
         assert rbv["broken"]["error"]
+
+
+class TestSearchAllVaultsIsolatesUnexpectedExceptions:
+    """A vault that triggers a non-ToolError must not fail the whole fan-out."""
+
+    @pytest.fixture
+    def vault_handlers(self):
+        def good(request):
+            if request.url.path == "/search/simple/":
+                return _ok([{"filename": "a.md", "score": -0.5, "matches": []}])
+            return httpx.Response(404)
+
+        def exploding(_request):
+            # A handler that raises an unexpected (non-httpx, non-ToolError) exception.
+            raise RuntimeError("oh no")
+
+        return {"good": good, "bad": exploding}
+
+    async def test_one_vault_runtimeerror_does_not_kill_fanout(self, mcp_client):
+        data = await _call(mcp_client, "search_all_vaults", {"query": "x"})
+        rbv = data["results_by_vault"]
+        assert rbv["good"]["status"] == "ok"
+        assert rbv["good"]["total_results"] == 1
+        assert rbv["bad"]["status"] == "error"
+        assert "RuntimeError" in rbv["bad"]["error"] or "oh no" in rbv["bad"]["error"]
 
 
 class TestSearchAllVaultsPerVaultDataviewFallback:

@@ -12,6 +12,12 @@ logger = setup_logging("obsidian-multivault-mcp.config")
 
 DEFAULT_CONFIG_PATH = "./obsidian-multivault-mcp-config.yaml"
 
+# Hosts where TLS verification is disabled by default because the plugin
+# ships a self-signed cert and the connection cannot be MITM'd in practice.
+# For any other host we keep verification on so a misconfigured remote
+# vault doesn't silently fall back to an unverified TLS session.
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
 
 @dataclass(frozen=True)
 class VaultConfig:
@@ -27,7 +33,13 @@ class VaultConfig:
 
     @property
     def verify_ssl(self) -> bool:
-        return self.scheme != "https"
+        # HTTP has no TLS; the verify flag is irrelevant but we return True for cleanliness.
+        if self.scheme != "https":
+            return True
+        # HTTPS to loopback: the plugin uses a self-signed cert, so verification has to
+        # be off. HTTPS to any non-loopback host: leave verification on — the user must
+        # have a properly issued cert if they exposed the plugin off-localhost.
+        return self.host not in LOOPBACK_HOSTS
 
 
 @dataclass(frozen=True)
@@ -36,7 +48,7 @@ class Config:
     path: Path
 
 
-def load_config(path: str | os.PathLike | None = None) -> Config:
+def load_config(path: str | os.PathLike | None = None) -> Config:  # pylint: disable=too-many-branches
     config_path = Path(path or os.environ.get("OBSIDIAN_MCP_CONFIG", DEFAULT_CONFIG_PATH))
     if not config_path.exists():
         raise RuntimeError(
@@ -58,6 +70,12 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
     for name, entry in raw_vaults.items():
         if not isinstance(name, str) or not name.strip():
             raise RuntimeError(f"Vault name must be a non-empty string, got: {name!r}.")
+        # Reject (don't silently strip) — a name with surrounding whitespace would
+        # store as ' personal ' but fail VaultName validation when callers pass 'personal'.
+        if name.strip() != name:
+            raise RuntimeError(
+                f"Vault name must not have leading or trailing whitespace, got: {name!r}."
+            )
         if not isinstance(entry, dict):
             raise RuntimeError(f"Vault '{name}' config must be a mapping.")
 
@@ -68,6 +86,10 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
         host = entry.get("host", "127.0.0.1")
         if not isinstance(host, str) or not host.strip():
             raise RuntimeError(f"Vault '{name}' host must be a non-empty string.")
+        if host.strip() != host:
+            raise RuntimeError(
+                f"Vault '{name}' host must not have leading or trailing whitespace, got: {host!r}."
+            )
 
         port = entry.get("port")
         if not isinstance(port, int) or port <= 0 or port > 65535:
@@ -78,6 +100,11 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
         api_key_env = entry.get("api_key_env")
         if not isinstance(api_key_env, str) or not api_key_env.strip():
             raise RuntimeError(f"Vault '{name}' missing or invalid 'api_key_env'.")
+        if api_key_env.strip() != api_key_env:
+            raise RuntimeError(
+                f"Vault '{name}' api_key_env must not have leading or trailing whitespace, "
+                f"got: {api_key_env!r}."
+            )
 
         api_key = os.environ.get(api_key_env, "").strip()
         if not api_key:

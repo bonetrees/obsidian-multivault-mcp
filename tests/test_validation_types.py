@@ -80,6 +80,15 @@ class TestVaultPath:
     def test_spaces_in_filename_allowed(self):
         assert self.adapter.validate_python("My Folder/My Note.md") == "My Folder/My Note.md"
 
+    def test_leading_whitespace_rejected(self):
+        # Don't silently mutate user input.
+        with pytest.raises(ValidationError):
+            self.adapter.validate_python(" notes/foo.md")
+
+    def test_trailing_whitespace_rejected(self):
+        with pytest.raises(ValidationError):
+            self.adapter.validate_python("notes/foo.md ")
+
 
 class TestClampedContextLength:
     adapter = TypeAdapter(ClampedContextLength)

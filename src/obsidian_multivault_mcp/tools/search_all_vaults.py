@@ -3,11 +3,13 @@
 import asyncio
 
 from fastmcp import Context
-from fastmcp.exceptions import ToolError
 
+from ..logging_config import setup_logging
 from ..server import get_all_clients, mcp
 from ..validation_types import ClampedContextLength, SearchType
 from .search_vault import run_search
+
+logger = setup_logging("obsidian-multivault-mcp.tools.search_all_vaults")
 
 
 async def _one_vault(name, client, search_type, query, context_length) -> tuple[str, dict]:
@@ -20,13 +22,17 @@ async def _one_vault(name, client, search_type, query, context_length) -> tuple[
             "warning": warning,
             "error": None,
         }
-    except ToolError as exc:
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        # Per-vault isolation: never let one vault's failure kill the whole fan-out.
+        # Catch broadly (not just ToolError) so unexpected runtime errors stay scoped
+        # to the vault that produced them.
+        logger.warning("Vault %r search failed: %s", name, exc)
         return name, {
             "status": "error",
             "results": [],
             "total_results": 0,
             "warning": None,
-            "error": str(exc),
+            "error": f"{type(exc).__name__}: {exc}",
         }
 
 
