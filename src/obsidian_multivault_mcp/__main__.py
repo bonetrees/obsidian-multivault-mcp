@@ -1,0 +1,87 @@
+"""CLI entry point. Loads .env, parses args, runs FastMCP on the chosen transport."""
+
+import argparse
+import os
+import sys
+
+from dotenv import load_dotenv
+
+# load_dotenv must run before anything that reads OBSIDIAN_* env vars.
+load_dotenv(override=True)
+
+# pylint: disable=wrong-import-position
+from . import __version__
+from .logging_config import setup_logging
+
+logger = setup_logging("obsidian-multivault-mcp")
+
+
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="obsidian-multivault-mcp",
+        description=(
+            "MCP server providing multi-vault Obsidian access via the "
+            "obsidian-local-rest-api plugin."
+        ),
+    )
+    parser.add_argument(
+        "--transport",
+        choices=["streamable-http", "sse", "stdio"],
+        default="streamable-http",
+        help="Transport protocol (default: streamable-http).",
+    )
+    parser.add_argument(
+        "--host",
+        default=None,
+        help="Bind host for HTTP transports (default: $OBSIDIAN_MCP_HOST or 127.0.0.1).",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="Bind port for HTTP transports (default: $OBSIDIAN_MCP_PORT or 8100).",
+    )
+    parser.add_argument(
+        "--config",
+        default=None,
+        help="Path to YAML config file (overrides $OBSIDIAN_MCP_CONFIG).",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv)
+
+    if args.config:
+        os.environ["OBSIDIAN_MCP_CONFIG"] = args.config
+
+    host = args.host or os.environ.get("OBSIDIAN_MCP_HOST", "127.0.0.1")
+    port = args.port or int(os.environ.get("OBSIDIAN_MCP_PORT", "8100"))
+
+    if args.transport != "stdio" and host not in ("127.0.0.1", "localhost", "::1"):
+        logger.warning(
+            "Binding %s on non-loopback host %s. The server has no auth — "
+            "only do this on a trusted network.",
+            args.transport,
+            host,
+        )
+
+    # Imports happen after dotenv + arg parsing so config/env are ready.
+    # pylint: disable=import-outside-toplevel
+    from .server import mcp
+    from . import tools  # noqa: F401  pylint: disable=unused-import,import-outside-toplevel
+
+    if args.transport == "stdio":
+        mcp.run(transport="stdio")
+    else:
+        mcp.run(transport=args.transport, host=host, port=port)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

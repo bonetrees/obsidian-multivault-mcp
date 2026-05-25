@@ -1,0 +1,24 @@
+# Multi-vault Obsidian MCP config.
+# Copy to obsidian-multivault-mcp-config.yaml and edit per your setup,
+# or point OBSIDIAN_MCP_CONFIG at a different path.
+#
+# Each entry under `vaults:` configures one Obsidian vault that has the
+# obsidian-local-rest-api plugin installed and running. The vault key
+# (e.g. "devprojects") is what gets passed as the `vault` parameter to
+# every tool call.
+#
+# API keys are NOT stored in this file. Set them in .env and reference the
+# env var name with `api_key_env`.
+
+vaults:
+  devprojects:
+    scheme: "https"          # "https" (default) or "http"
+    host: "127.0.0.1"
+    port: 27124              # 27124 is the plugin's HTTPS default; 27123 for HTTP
+    api_key_env: "OBSIDIAN_DEVPROJECTS_API_KEY"
+
+  personal:
+    scheme: "https"
+    host: "127.0.0.1"
+    port: 27124
+    api_key_env: "OBSIDIAN_PERSONAL_API_KEY"

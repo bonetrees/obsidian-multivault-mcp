@@ -216,3 +216,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Project-specific
+obsidian-multivault-mcp-config.yaml
+.claude/settings.local.json
+
