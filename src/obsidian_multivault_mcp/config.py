@@ -24,9 +24,9 @@ def _is_loopback_host(host: str) -> bool:
     distros like Debian/Ubuntu put the system hostname at 127.0.1.1 and
     those should still be treated as loopback. ``localhost`` is special-
     cased because DNS resolution of that name happens later in httpx, not
-    here.
+    here; the match is case-insensitive since DNS names are.
     """
-    if host == "localhost":
+    if host.lower() == "localhost":
         return True
     try:
         return ipaddress.ip_address(host).is_loopback

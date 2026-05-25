@@ -267,6 +267,17 @@ class TestDeleteNote:
             )
         assert "confirm=True" in str(exc_info.value)
 
+    async def test_delete_confirm_non_bool_rejected(self, mcp_client):
+        # StrictBool: integers and strings must not slip past the safety
+        # gate via Pydantic's lax coercion. confirm=1 should fail schema
+        # validation, not be coerced to True and delete the note.
+        with pytest.raises(ToolError):
+            await _call(
+                mcp_client,
+                "delete_note",
+                {"vault": "v", "path": "old.md", "confirm": 1},
+            )
+
     async def test_delete_omitted_confirm_hits_runtime_gate(self, mcp_client):
         # confirm defaults to False so the LLM-friendly runtime gate fires
         # instead of a less-helpful Pydantic schema error.

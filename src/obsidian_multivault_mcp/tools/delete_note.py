@@ -2,6 +2,7 @@
 
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
+from pydantic import StrictBool
 
 from ..server import get_client, mcp
 from ..validation_types import VaultFilePath, VaultName
@@ -16,7 +17,7 @@ from ..validation_types import VaultFilePath, VaultName
     tags={"obsidian", "write"},
 )
 async def delete_note(
-    ctx: Context, vault: VaultName, path: VaultFilePath, confirm: bool = False
+    ctx: Context, vault: VaultName, path: VaultFilePath, confirm: StrictBool = False
 ) -> dict:
     """Delete a note from a vault. Destructive — confirm with the user first.
 

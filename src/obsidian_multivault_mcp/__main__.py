@@ -76,7 +76,13 @@ def main(argv: list[str] | None = None) -> int:
     host = args.host or os.environ.get("OBSIDIAN_MCP_HOST", "127.0.0.1")
     port = args.port or _env_int("OBSIDIAN_MCP_PORT", 8100)
 
-    if args.transport != "stdio" and host not in ("127.0.0.1", "localhost", "::1"):
+    # Reuse the project-wide loopback definition rather than maintaining a
+    # parallel hardcoded list (which previously missed 127.0.0.0/8, IPv6
+    # loopback variants, uppercase "Localhost", etc.).
+    # pylint: disable-next=import-outside-toplevel
+    from .config import _is_loopback_host
+
+    if args.transport != "stdio" and not _is_loopback_host(host):
         logger.warning(
             "Binding %s on non-loopback host %s. The server has no auth — "
             "only do this on a trusted network.",

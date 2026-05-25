@@ -46,6 +46,11 @@ class TestVerifySsl:
     def test_https_localhost_disables_verify(self):
         assert self._make("https", "localhost").verify_ssl is False
 
+    def test_https_localhost_case_insensitive(self):
+        # DNS names are case-insensitive; uppercase 'Localhost' is still loopback.
+        assert self._make("https", "Localhost").verify_ssl is False
+        assert self._make("https", "LOCALHOST").verify_ssl is False
+
     def test_https_loopback_ipv6_disables_verify(self):
         assert self._make("https", "::1").verify_ssl is False
 
