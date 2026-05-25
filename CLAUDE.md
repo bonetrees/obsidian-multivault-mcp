@@ -169,6 +169,7 @@ Loaded via `python-dotenv` with `load_dotenv(override=True)` in `__main__.py`.
 dependencies = [
     "fastmcp (>=3.0.0,<4.0.0)",
     "httpx (>=0.28.0,<1.0.0)",
+    "pydantic (>=2.11.0,<3.0.0)",
     "python-dotenv (>=1.0.0,<2.0.0)",
     "pyyaml (>=6.0,<7.0)",
 ]
