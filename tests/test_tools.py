@@ -9,6 +9,7 @@ import json
 
 import httpx
 import pytest
+from fastmcp.exceptions import ToolError
 
 
 # ---------- helpers ----------
@@ -169,12 +170,12 @@ class TestReadNote:
         assert data["stat"]["size"] == len("---\ntitle: hi\n---\nThe body.")
 
     async def test_read_unknown_vault_raises(self, mcp_client):
-        with pytest.raises(Exception) as exc_info:
+        with pytest.raises(ToolError) as exc_info:
             await _call(mcp_client, "read_note", {"vault": "nope", "path": "x.md"})
         assert "Unknown vault" in str(exc_info.value)
 
     async def test_read_404_raises(self, mcp_client):
-        with pytest.raises(Exception) as exc_info:
+        with pytest.raises(ToolError) as exc_info:
             await _call(mcp_client, "read_note", {"vault": "v", "path": "missing.md"})
         assert "Not found" in str(exc_info.value)
 
@@ -258,7 +259,7 @@ class TestDeleteNote:
         return {"v": vault}
 
     async def test_delete_requires_confirm(self, mcp_client):
-        with pytest.raises(Exception) as exc_info:
+        with pytest.raises(ToolError) as exc_info:
             await _call(
                 mcp_client,
                 "delete_note",
@@ -269,7 +270,7 @@ class TestDeleteNote:
     async def test_delete_omitted_confirm_hits_runtime_gate(self, mcp_client):
         # confirm defaults to False so the LLM-friendly runtime gate fires
         # instead of a less-helpful Pydantic schema error.
-        with pytest.raises(Exception) as exc_info:
+        with pytest.raises(ToolError) as exc_info:
             await _call(mcp_client, "delete_note", {"vault": "v", "path": "old.md"})
         assert "confirm=True" in str(exc_info.value)
 
@@ -331,7 +332,7 @@ class TestSearchVault:
         assert data["results"] == [{"path": "b.md", "score": None, "context": []}]
 
     async def test_jsonlogic_bad_json_raises(self, mcp_client):
-        with pytest.raises(Exception) as exc_info:
+        with pytest.raises(ToolError) as exc_info:
             await _call(
                 mcp_client,
                 "search_vault",

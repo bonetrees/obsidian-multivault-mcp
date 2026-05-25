@@ -34,6 +34,22 @@ class ObsidianVaultClient:
     DATAVIEW_NOT_INSTALLED_CODE = 40070
     INVALID_PATCH_TARGET_CODE = 40080
 
+    @classmethod
+    def _resolve_timeout_env(cls) -> float:
+        raw = os.environ.get("OBSIDIAN_MCP_TIMEOUT")
+        if raw is None or raw == "":
+            return cls.DEFAULT_TIMEOUT
+        try:
+            return float(raw)
+        except ValueError:
+            # Don't crash the server over a mis-set env var — log and fall back.
+            logger.warning(
+                "Ignoring invalid OBSIDIAN_MCP_TIMEOUT=%r (expected number); using default %s.",
+                raw,
+                cls.DEFAULT_TIMEOUT,
+            )
+            return cls.DEFAULT_TIMEOUT
+
     def __init__(
         self,
         name: str,
@@ -45,11 +61,7 @@ class ObsidianVaultClient:
     ) -> None:
         self.name = name
         self.base_url = base_url
-        self._timeout = (
-            timeout
-            if timeout is not None
-            else float(os.environ.get("OBSIDIAN_MCP_TIMEOUT", str(self.DEFAULT_TIMEOUT)))
-        )
+        self._timeout = timeout if timeout is not None else self._resolve_timeout_env()
         kwargs: dict[str, Any] = {
             "base_url": base_url,
             "headers": {"Authorization": f"Bearer {api_key}"},
@@ -125,9 +137,12 @@ class ObsidianVaultClient:
                 f"{location} (HTTP 401). Check the API key. ({msg})"
             )
         if response.status_code == 404:
-            raise NotFound(f"Not found{location} in vault '{self.name}': {msg}")
+            raise NotFound(f"Not found{location} in vault '{self.name}' during {operation}: {msg}")
         if response.status_code == 405:
-            raise ToolError(f"Operation not supported{location} in vault '{self.name}': {msg}")
+            raise ToolError(
+                f"Operation not supported{location} in vault '{self.name}' "
+                f"during {operation}: {msg}"
+            )
         if code == self.INVALID_PATCH_TARGET_CODE:
             raise ToolError(
                 f"Invalid PATCH target{location} in vault '{self.name}': {msg}. "

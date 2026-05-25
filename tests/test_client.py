@@ -111,9 +111,11 @@ class TestReadNote:
                 await client.read_note("missing.md")
         # NotFound is a ToolError subclass so existing handling still works.
         assert isinstance(exc_info.value, ToolError)
-        assert "Not found" in str(exc_info.value)
-        assert "missing.md" in str(exc_info.value)
-        assert "test" in str(exc_info.value)  # vault name in message
+        msg = str(exc_info.value)
+        assert "Not found" in msg
+        assert "missing.md" in msg
+        assert "test" in msg  # vault name in message
+        assert "read_note" in msg  # operation context
 
     async def test_401_raises_toolerror_with_api_key_hint(self):
         def handler(_request):
@@ -414,6 +416,39 @@ class TestMalformedJsonSuccessResponse:
         assert "Invalid JSON response" in msg
         assert "read_note" in msg
         assert "test" in msg  # vault name in message
+
+
+class TestEnvTimeoutFallback:
+    """OBSIDIAN_MCP_TIMEOUT should not crash startup on garbage values."""
+
+    def test_invalid_value_falls_back_to_default(self, monkeypatch, caplog):
+        monkeypatch.setenv("OBSIDIAN_MCP_TIMEOUT", "not-a-number")
+        # No transport — we only need to verify the construct doesn't raise.
+        client = ObsidianVaultClient(
+            name="t",
+            base_url="https://127.0.0.1:27124",
+            api_key="k",
+            verify_ssl=False,
+        )
+        assert (
+            client._timeout == ObsidianVaultClient.DEFAULT_TIMEOUT
+        )  # pylint: disable=protected-access
+
+    def test_unset_uses_default(self, monkeypatch):
+        monkeypatch.delenv("OBSIDIAN_MCP_TIMEOUT", raising=False)
+        client = ObsidianVaultClient(
+            name="t", base_url="https://127.0.0.1:27124", api_key="k", verify_ssl=False
+        )
+        assert (
+            client._timeout == ObsidianVaultClient.DEFAULT_TIMEOUT
+        )  # pylint: disable=protected-access
+
+    def test_valid_override(self, monkeypatch):
+        monkeypatch.setenv("OBSIDIAN_MCP_TIMEOUT", "5")
+        client = ObsidianVaultClient(
+            name="t", base_url="https://127.0.0.1:27124", api_key="k", verify_ssl=False
+        )
+        assert client._timeout == 5.0  # pylint: disable=protected-access
 
 
 class TestLifecycle:

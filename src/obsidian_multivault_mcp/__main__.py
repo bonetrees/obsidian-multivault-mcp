@@ -54,6 +54,19 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _env_int(var: str, default: int) -> int:
+    raw = os.environ.get(var)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError as exc:
+        # Surface a clear single-line error instead of a raw ValueError stack.
+        raise SystemExit(
+            f"obsidian-multivault-mcp: invalid {var}={raw!r} (expected integer): {exc}"
+        ) from exc
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
 
@@ -61,7 +74,7 @@ def main(argv: list[str] | None = None) -> int:
         os.environ["OBSIDIAN_MCP_CONFIG"] = args.config
 
     host = args.host or os.environ.get("OBSIDIAN_MCP_HOST", "127.0.0.1")
-    port = args.port or int(os.environ.get("OBSIDIAN_MCP_PORT", "8100"))
+    port = args.port or _env_int("OBSIDIAN_MCP_PORT", 8100)
 
     if args.transport != "stdio" and host not in ("127.0.0.1", "localhost", "::1"):
         logger.warning(
