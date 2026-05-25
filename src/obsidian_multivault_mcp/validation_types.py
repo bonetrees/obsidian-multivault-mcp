@@ -2,7 +2,7 @@
 
 from typing import Annotated, Literal
 
-from pydantic import AfterValidator
+from pydantic import AfterValidator, BeforeValidator
 
 
 def validate_vault_name(value: str) -> str:
@@ -52,6 +52,20 @@ def validate_vault_file_path(value: str) -> str:
     return cleaned
 
 
+def _reject_non_int_context_length(value):
+    """Pydantic BeforeValidator: reject non-int (incl. bool) before coercion.
+
+    Without this, JSON ``true`` / Python ``True`` would coerce to 1 and then
+    silently get clamped to 20 — surprising behavior for callers. Strings,
+    floats, etc. are also rejected so the type signature stays honest.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(
+            f"context_length must be an integer, got {type(value).__name__}: {value!r}"
+        )
+    return value
+
+
 def clamp_context_length(value: int) -> int:
     return max(20, min(500, value))
 
@@ -62,4 +76,8 @@ VaultFilePath = Annotated[str, AfterValidator(validate_vault_file_path)]
 PatchOperation = Literal["append", "prepend", "replace"]
 PatchTargetType = Literal["heading", "block-reference", "frontmatter-key"]
 SearchType = Literal["text", "jsonlogic", "dataview"]
-ClampedContextLength = Annotated[int, AfterValidator(clamp_context_length)]
+ClampedContextLength = Annotated[
+    int,
+    BeforeValidator(_reject_non_int_context_length),
+    AfterValidator(clamp_context_length),
+]

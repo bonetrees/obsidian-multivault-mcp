@@ -131,6 +131,22 @@ class TestClampedContextLength:
     def test_clamp_above_upper(self):
         assert self.adapter.validate_python(10000) == 500
 
+    def test_bool_rejected(self):
+        # bool is a subclass of int — without the BeforeValidator, True
+        # would silently coerce to 1 and then clamp to 20.
+        with pytest.raises(ValidationError):
+            self.adapter.validate_python(True)
+        with pytest.raises(ValidationError):
+            self.adapter.validate_python(False)
+
+    def test_string_rejected(self):
+        with pytest.raises(ValidationError):
+            self.adapter.validate_python("100")
+
+    def test_float_rejected(self):
+        with pytest.raises(ValidationError):
+            self.adapter.validate_python(100.5)
+
 
 class TestPatchOperation:
     adapter = TypeAdapter(PatchOperation)
