@@ -6,8 +6,8 @@ from ..server import get_client, mcp
 from ..validation_types import (
     PatchOperation,
     PatchTargetType,
+    VaultFilePath,
     VaultName,
-    VaultPath,
 )
 
 
@@ -18,7 +18,7 @@ from ..validation_types import (
 async def patch_note(
     ctx: Context,
     vault: VaultName,
-    path: VaultPath,
+    path: VaultFilePath,
     operation: PatchOperation,
     target_type: PatchTargetType,
     target: str,

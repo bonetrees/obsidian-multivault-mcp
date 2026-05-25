@@ -8,6 +8,7 @@ from obsidian_multivault_mcp.validation_types import (
     PatchOperation,
     PatchTargetType,
     SearchType,
+    VaultFilePath,
     VaultName,
     VaultPath,
 )
@@ -88,6 +89,27 @@ class TestVaultPath:
     def test_trailing_whitespace_rejected(self):
         with pytest.raises(ValidationError):
             self.adapter.validate_python("notes/foo.md ")
+
+
+class TestVaultFilePath:
+    """File-only variant: same rules as VaultPath but root is rejected."""
+
+    adapter = TypeAdapter(VaultFilePath)
+
+    def test_normal_path_allowed(self):
+        assert self.adapter.validate_python("notes/foo.md") == "notes/foo.md"
+
+    def test_strips_surrounding_slashes(self):
+        assert self.adapter.validate_python("/notes/foo.md/") == "notes/foo.md"
+
+    def test_empty_rejected(self):
+        with pytest.raises(ValidationError):
+            self.adapter.validate_python("")
+
+    def test_single_slash_rejected(self):
+        # "/" normalises to "" — note tools must not accept root.
+        with pytest.raises(ValidationError):
+            self.adapter.validate_python("/")
 
 
 class TestClampedContextLength:

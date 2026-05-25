@@ -93,7 +93,9 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
             )
 
         port = entry.get("port")
-        if not isinstance(port, int) or port <= 0 or port > 65535:
+        # bool is a subclass of int in Python, so isinstance(True, int) is True.
+        # YAML `port: true` would otherwise pass and be treated as port 1.
+        if isinstance(port, bool) or not isinstance(port, int) or port <= 0 or port > 65535:
             raise RuntimeError(
                 f"Vault '{name}' port must be an integer in 1..65535, got: {port!r}."
             )

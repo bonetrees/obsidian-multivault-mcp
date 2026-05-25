@@ -3,14 +3,14 @@
 from fastmcp import Context
 
 from ..server import get_client, mcp
-from ..validation_types import VaultName, VaultPath
+from ..validation_types import VaultFilePath, VaultName
 
 
 @mcp.tool(
     annotations={"readOnlyHint": False, "openWorldHint": False},
     tags={"obsidian", "write"},
 )
-async def write_note(ctx: Context, vault: VaultName, path: VaultPath, content: str) -> dict:
+async def write_note(ctx: Context, vault: VaultName, path: VaultFilePath, content: str) -> dict:
     """Create a new note or fully overwrite an existing one.
 
     Intermediate directories are created automatically. **This overwrites

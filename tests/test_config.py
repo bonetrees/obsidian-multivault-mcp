@@ -77,6 +77,26 @@ class TestLoadConfigValidation:
         with pytest.raises(RuntimeError, match="whitespace"):
             load_config(path)
 
+    def test_port_bool_rejected(self, tmp_path, monkeypatch):
+        # YAML `port: true` parses as Python True; bool is a subclass of int,
+        # so a naive isinstance(int) check would treat it as port 1.
+        monkeypatch.setenv("OBSIDIAN_VAULT_API_KEY", "k")
+        path = _write_config(
+            tmp_path,
+            textwrap.dedent(
+                """\
+                vaults:
+                  v:
+                    scheme: "https"
+                    host: "127.0.0.1"
+                    port: true
+                    api_key_env: "OBSIDIAN_VAULT_API_KEY"
+                """
+            ),
+        )
+        with pytest.raises(RuntimeError, match="port"):
+            load_config(path)
+
     def test_api_key_env_whitespace_rejected(self, tmp_path, monkeypatch):
         monkeypatch.setenv(" OBSIDIAN_VAULT_API_KEY ", "k")
         path = _write_config(

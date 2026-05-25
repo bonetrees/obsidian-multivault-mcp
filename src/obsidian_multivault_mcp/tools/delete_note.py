@@ -4,7 +4,7 @@ from fastmcp import Context
 from fastmcp.exceptions import ToolError
 
 from ..server import get_client, mcp
-from ..validation_types import VaultName, VaultPath
+from ..validation_types import VaultFilePath, VaultName
 
 
 @mcp.tool(
@@ -15,7 +15,7 @@ from ..validation_types import VaultName, VaultPath
     },
     tags={"obsidian", "write"},
 )
-async def delete_note(ctx: Context, vault: VaultName, path: VaultPath, confirm: bool) -> dict:
+async def delete_note(ctx: Context, vault: VaultName, path: VaultFilePath, confirm: bool) -> dict:
     """Delete a note from a vault. Destructive — confirm with the user first.
 
     `confirm` must be `True` to proceed; this is a safety gate to prevent

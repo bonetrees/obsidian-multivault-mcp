@@ -3,7 +3,7 @@
 from fastmcp import Context
 
 from ..server import get_client, mcp
-from ..validation_types import VaultName, VaultPath
+from ..validation_types import VaultFilePath, VaultName
 from ._helpers import epoch_ms_to_iso, strip_frontmatter
 
 
@@ -29,7 +29,7 @@ def curate_note(vault: str, path: str, raw: dict) -> dict:
     annotations={"readOnlyHint": True, "openWorldHint": False},
     tags={"obsidian", "read"},
 )
-async def read_note(ctx: Context, vault: VaultName, path: VaultPath) -> dict:
+async def read_note(ctx: Context, vault: VaultName, path: VaultFilePath) -> dict:
     """Read a single note's content, frontmatter, tags, and file metadata.
 
     Returns the note's body markdown (frontmatter fences stripped — the
