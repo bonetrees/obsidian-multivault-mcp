@@ -19,8 +19,6 @@ _CONFIGURED = False
 
 def _resolve_level(raw: str) -> int:
     """Map a string level to the int constant. Unknown values fall back to INFO."""
-    # logging._nameToLevel exists on every supported Python; getLevelNamesMapping
-    # is 3.11+. Use the underscore name for back-compat and treat it as stable.
     mapping = logging.getLevelNamesMapping()
     resolved = mapping.get(raw.upper())
     if resolved is None:

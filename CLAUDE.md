@@ -71,7 +71,7 @@ tests/
 
 - **Tool tags and annotations.** All tools: `tags={"obsidian", "category"}`. Read tools: `readOnlyHint=True`, `openWorldHint=False`. Write tools: `readOnlyHint=False`. `delete_note`: `destructiveHint=True`.
 
-- **Error handling.** Catch `httpx.HTTPStatusError`, `httpx.ConnectError`, `httpx.TimeoutException` → raise `ToolError`. Never return `{"error": ...}` dicts. Parse API error body `{"message": str, "errorCode": int}` for actionable messages.
+- **Error handling.** The client does *not* use `httpx.raise_for_status` / `HTTPStatusError`. Instead, every response goes through `_raise_for_status()` which parses the API error body `{"message": str, "errorCode": int}` and raises `ToolError` (or its `NotFound` subclass for HTTP 404). Transport-layer exceptions are caught in `_request()`: `ConnectError`, `ConnectTimeout`, generic `TimeoutException`, and a `RequestError` catch-all all map to `ToolError` with vault + operation context — nothing httpx-shaped leaks past the client. Never return `{"error": ...}` dicts.
 
 - **Curator: frontmatter stripping.** Raw API `content` includes YAML frontmatter fences. Curator regex `^---\n.*?---\n` (with `re.DOTALL`) strips the leading block including both fences; empty frontmatter (`---\n---\n`) is also stripped. Malformed/unterminated blocks pass through unchanged.
 
@@ -89,15 +89,20 @@ tests/
 
 ### Exception types
 
-| Exception | Catch? | Response |
+HTTP status codes are inspected by `_raise_for_status()` directly (no `HTTPStatusError`).
+Transport errors are caught in `_request()` and mapped to `ToolError`.
+
+| Condition | Where | Response |
 |---|---|---|
-| `httpx.HTTPStatusError` (401) | Yes | `ToolError`: auth failed, check API key |
-| `httpx.HTTPStatusError` (404) | Yes | `ToolError`: not found |
-| `httpx.HTTPStatusError` (400, code 40070) | Yes | Dataview fallback to simple search |
-| `httpx.HTTPStatusError` (400, code 40080) | Yes | `ToolError`: invalid PATCH target |
-| `httpx.ConnectError` | Yes | `ToolError`: Obsidian not running |
-| `httpx.TimeoutException` | Yes | `ToolError`: timeout with value |
-| Other `httpx` errors | Let propagate | FastMCP catches |
+| HTTP 401 | `_raise_for_status` | `ToolError`: auth failed, check API key |
+| HTTP 404 | `_raise_for_status` | `NotFound` (subclass of `ToolError`): not found at path |
+| HTTP 405 | `_raise_for_status` | `ToolError`: operation not supported |
+| HTTP 400 + `errorCode: 40070` | `search_dataview` | Silent fallback to text search; warning string returned |
+| HTTP 400 + `errorCode: 40080` | `_raise_for_status` | `ToolError`: invalid PATCH target, with `::` syntax hint |
+| `httpx.ConnectError` | `_request` | `ToolError`: "Cannot connect…, is Obsidian running?" |
+| `httpx.ConnectTimeout` | `_request` | `ToolError`: timed out after `CONNECT_TIMEOUT` (10 s) |
+| `httpx.TimeoutException` (read/write/pool) | `_request` | `ToolError`: timed out after `self._timeout` (default 30 s) |
+| `httpx.RequestError` (anything else: protocol, read, …) | `_request` | `ToolError`: "Transport error… {type}: {exc}" |
 
 ### PATCH heading targets
 
