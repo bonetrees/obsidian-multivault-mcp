@@ -149,7 +149,16 @@ class ObsidianVaultClient:
         body = self._parse_error_body(response)
         msg = body.get("message") or (response.text.strip() if response.text else "(no body)")
         code = body.get("errorCode")
-        location = f" at '{path}'" if path else ""
+        # Render the empty string as '/' rather than dropping the segment —
+        # list_directory(path="") targets the vault root and the error
+        # message should say so. None means the caller didn't supply a path
+        # at all (e.g. search endpoints), so we omit the segment in that case.
+        if path is None:
+            location = ""
+        elif path == "":
+            location = " at '/'"
+        else:
+            location = f" at '{path}'"
         if response.status_code == 401:
             raise ToolError(
                 f"Authentication failed for vault '{self.name}' during {operation}"
@@ -324,6 +333,15 @@ class ObsidianVaultClient:
                 f"Expected 'files' to be a JSON array from vault '{self.name}' "
                 f"during list_directory at '{path}', got {type(files).__name__}."
             )
+        # Element-level guard so the curator's `entry.endswith("/")` can't blow
+        # up with AttributeError on a wrong-shaped element. ToolError fires
+        # with the bad entry's type for easier diagnosis.
+        for i, entry in enumerate(files):
+            if not isinstance(entry, str):
+                raise ToolError(
+                    f"Expected 'files[{i}]' to be a string from vault '{self.name}' "
+                    f"during list_directory at '{path}', got {type(entry).__name__}."
+                )
         return list(files)
 
     async def search_simple(self, query: str, context_length: int) -> list[dict]:

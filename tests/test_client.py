@@ -262,6 +262,34 @@ class TestListDirectory:
         assert result == ["a.md", "b/"]
 
 
+class TestErrorLocationFormatting:
+    """Empty-string path (used by list_directory(path="") for root) must still
+    show up in error messages as '/' — not be silently dropped."""
+
+    async def test_root_directory_404_shows_root_in_message(self):
+        def handler(_request):
+            return httpx.Response(404, json={"errorCode": 40400, "message": "no root"})
+
+        async with make_client(handler) as client:
+            with pytest.raises(NotFound) as exc_info:
+                await client.list_directory("")
+        msg = str(exc_info.value)
+        assert "at '/'" in msg
+        assert "list_directory" in msg
+
+    async def test_no_path_omits_location_segment(self):
+        # When path is None (search endpoints), there shouldn't be a stray
+        # "at ''" segment — confirm the message just lists vault + operation.
+        def handler(_request):
+            return httpx.Response(500, text="upstream broken")
+
+        async with make_client(handler) as client:
+            with pytest.raises(ToolError) as exc_info:
+                await client.search_simple("q", context_length=100)
+        msg = str(exc_info.value)
+        assert "at '" not in msg
+
+
 class TestListDirectoryShapeValidation:
     """A 2xx response that isn't an object-with-files-array must raise
     ToolError instead of silently returning an empty list — otherwise
@@ -285,6 +313,21 @@ class TestListDirectoryShapeValidation:
                 await client.list_directory("notes")
         assert "files" in str(exc_info.value).lower()
         assert "JSON array" in str(exc_info.value)
+
+    async def test_non_string_element_raises(self):
+        # A non-str element would later AttributeError in the curator on
+        # entry.endswith("/"). Catch it at the client boundary with the
+        # bad entry's index and type for easier diagnosis.
+        def handler(_request):
+            return httpx.Response(200, json={"files": ["ok.md", 42, "also-ok/"]})
+
+        async with make_client(handler) as client:
+            with pytest.raises(ToolError) as exc_info:
+                await client.list_directory("notes")
+        msg = str(exc_info.value)
+        assert "files[1]" in msg
+        assert "int" in msg
+        assert "string" in msg
 
 
 class TestSearchSimple:
