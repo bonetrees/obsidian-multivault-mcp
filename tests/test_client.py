@@ -329,6 +329,19 @@ class TestListDirectoryShapeValidation:
         assert "int" in msg
         assert "string" in msg
 
+    async def test_root_path_in_shape_error_renders_as_slash(self):
+        # path="" must render as "at '/'", consistent with _raise_for_status,
+        # rather than the bare "at ''" the inline f-string used to produce.
+        def handler(_request):
+            return httpx.Response(200, json=[1, 2, 3])
+
+        async with make_client(handler) as client:
+            with pytest.raises(ToolError) as exc_info:
+                await client.list_directory("")
+        msg = str(exc_info.value)
+        assert "at '/'" in msg
+        assert "at ''" not in msg
+
 
 class TestSearchSimple:
     async def test_query_in_url_params(self):

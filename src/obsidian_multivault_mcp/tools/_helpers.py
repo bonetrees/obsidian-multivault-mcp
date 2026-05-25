@@ -10,8 +10,9 @@ from datetime import datetime, timezone
 # The body+newline is wrapped in an optional non-capturing group so the
 # empty-frontmatter case "---\n---\n" also matches. End-of-string (\Z) is
 # accepted in place of the trailing newline for notes that end with the
-# closing fence (valid Markdown for stub notes).
-_FRONTMATTER_RE = re.compile(r"^---\n(?:.*?\n)?---(?:\n|\Z)", re.DOTALL)
+# closing fence (valid Markdown for stub notes). `\r?\n` rather than `\n`
+# at each line break so notes edited on Windows (CRLF) strip correctly too.
+_FRONTMATTER_RE = re.compile(r"^---\r?\n(?:.*?\r?\n)?---(?:\r?\n|\Z)", re.DOTALL)
 
 
 def strip_frontmatter(content: str) -> str:

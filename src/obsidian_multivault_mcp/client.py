@@ -138,6 +138,20 @@ class ObsidianVaultClient:
             )
         return body
 
+    @staticmethod
+    def _format_location(path: str | None) -> str:
+        """Render the ' at <path>' segment used in error messages.
+
+        - `None`         → ''            (path-less endpoints, e.g. search)
+        - `''`           → " at '/'"     (root listing — list_directory(path=""))
+        - any other str  → f" at '{path}'"
+        """
+        if path is None:
+            return ""
+        if path == "":
+            return " at '/'"
+        return f" at '{path}'"
+
     def _raise_for_status(
         self,
         response: httpx.Response,
@@ -149,16 +163,7 @@ class ObsidianVaultClient:
         body = self._parse_error_body(response)
         msg = body.get("message") or (response.text.strip() if response.text else "(no body)")
         code = body.get("errorCode")
-        # Render the empty string as '/' rather than dropping the segment —
-        # list_directory(path="") targets the vault root and the error
-        # message should say so. None means the caller didn't supply a path
-        # at all (e.g. search endpoints), so we omit the segment in that case.
-        if path is None:
-            location = ""
-        elif path == "":
-            location = " at '/'"
-        else:
-            location = f" at '{path}'"
+        location = self._format_location(path)
         if response.status_code == 401:
             raise ToolError(
                 f"Authentication failed for vault '{self.name}' during {operation}"
@@ -258,8 +263,8 @@ class ObsidianVaultClient:
             # Validating here means the curator can rely on `.get()` access
             # instead of crashing with AttributeError on a misbehaving proxy.
             raise ToolError(
-                f"Expected JSON object from vault '{self.name}' read_note at '{path}', "
-                f"got {type(body).__name__}."
+                f"Expected JSON object from vault '{self.name}' during read_note"
+                f"{self._format_location(path)}, got {type(body).__name__}."
             )
         return body
 
@@ -322,16 +327,17 @@ class ObsidianVaultClient:
         # Plugin spec: 2xx body is an object with a `files` array. Validate
         # both layers so an upstream/proxy contract breakage surfaces as a
         # ToolError instead of a misleading "empty directory" result.
+        location = self._format_location(path)
         if not isinstance(body, dict):
             raise ToolError(
-                f"Expected JSON object from vault '{self.name}' during list_directory "
-                f"at '{path}', got {type(body).__name__}."
+                f"Expected JSON object from vault '{self.name}' during list_directory"
+                f"{location}, got {type(body).__name__}."
             )
         files = body.get("files")
         if not isinstance(files, list):
             raise ToolError(
                 f"Expected 'files' to be a JSON array from vault '{self.name}' "
-                f"during list_directory at '{path}', got {type(files).__name__}."
+                f"during list_directory{location}, got {type(files).__name__}."
             )
         # Element-level guard so the curator's `entry.endswith("/")` can't blow
         # up with AttributeError on a wrong-shaped element. ToolError fires
@@ -340,7 +346,7 @@ class ObsidianVaultClient:
             if not isinstance(entry, str):
                 raise ToolError(
                     f"Expected 'files[{i}]' to be a string from vault '{self.name}' "
-                    f"during list_directory at '{path}', got {type(entry).__name__}."
+                    f"during list_directory{location}, got {type(entry).__name__}."
                 )
         return list(files)
 

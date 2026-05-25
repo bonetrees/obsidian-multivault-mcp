@@ -50,6 +50,17 @@ class TestStripFrontmatter:
         content = '---\ndescription: "test --- here"\nBody'
         assert strip_frontmatter(content) == content
 
+    def test_crlf_line_endings_stripped(self):
+        # Notes edited on Windows use CRLF. The block still has to strip
+        # cleanly — otherwise the YAML leaks into curated content.
+        content = "---\r\nkey: value\r\n---\r\nBody"
+        assert strip_frontmatter(content) == "Body"
+
+    def test_mixed_crlf_and_lf_stripped(self):
+        # Mixed endings (e.g. file moved between OSes) — should still strip.
+        content = "---\nkey: value\r\n---\nBody"
+        assert strip_frontmatter(content) == "Body"
+
     def test_malformed_unterminated_passthrough(self):
         content = "---\nkey: value\nno closing fence"
         assert strip_frontmatter(content) == content
