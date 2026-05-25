@@ -35,6 +35,21 @@ class TestStripFrontmatter:
         content = "---\nkey: value\n---"
         assert strip_frontmatter(content) == ""
 
+    def test_does_not_terminate_at_mid_line_dashes(self):
+        # "---" inside a YAML value (here, a quoted string with literal
+        # dashes) must NOT count as the closing fence — the closer has to
+        # be on its own line. Earlier regex `^---\n.*?---(?:\n|\Z)` would
+        # have stopped at the inline "---" and corrupted the content.
+        content = '---\ndescription: "test --- here"\nkey: v\n---\nBody'
+        assert strip_frontmatter(content) == "Body"
+
+    def test_does_not_terminate_at_mid_line_dashes_only_inline(self):
+        # If the only "---" inside the block is mid-line, there's no real
+        # closing fence — the block should pass through unmodified rather
+        # than half-strip and corrupt the content.
+        content = '---\ndescription: "test --- here"\nBody'
+        assert strip_frontmatter(content) == content
+
     def test_malformed_unterminated_passthrough(self):
         content = "---\nkey: value\nno closing fence"
         assert strip_frontmatter(content) == content

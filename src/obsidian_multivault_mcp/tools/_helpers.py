@@ -3,11 +3,15 @@
 import re
 from datetime import datetime, timezone
 
-# Closing fence may be followed by \n (normal body follows) or by end-of-string
-# (note ends with the frontmatter block — valid Markdown, surprisingly common
-# for stub notes). Without the \Z alternative the regex would leak the raw
-# block into `content` / `index`.
-_FRONTMATTER_RE = re.compile(r"^---\n.*?---(?:\n|\Z)", re.DOTALL)
+# Frontmatter starts at line 1 with "---\n" and ends with a "---" line of
+# its own. Requiring "\n---" (not just "---") for the closing fence prevents
+# a mid-line "---" inside a YAML value (e.g. ``description: "test --- here"``)
+# from prematurely terminating the block and corrupting the curated content.
+# The body+newline is wrapped in an optional non-capturing group so the
+# empty-frontmatter case "---\n---\n" also matches. End-of-string (\Z) is
+# accepted in place of the trailing newline for notes that end with the
+# closing fence (valid Markdown for stub notes).
+_FRONTMATTER_RE = re.compile(r"^---\n(?:.*?\n)?---(?:\n|\Z)", re.DOTALL)
 
 
 def strip_frontmatter(content: str) -> str:
