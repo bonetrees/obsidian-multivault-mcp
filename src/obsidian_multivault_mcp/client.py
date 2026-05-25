@@ -124,6 +124,20 @@ class ObsidianVaultClient:
                 f"{type(exc).__name__}: {exc}. Body started with: {snippet!r}"
             ) from exc
 
+    def _require_list(self, body: Any, operation: str) -> list:
+        """Validate that a parsed success-path body is a JSON array.
+
+        Silently returning `[]` on a wrong-shape response would conflate
+        "no matches" with "upstream/proxy contract breakage", which makes
+        debugging painful. Raise ToolError instead.
+        """
+        if not isinstance(body, list):
+            raise ToolError(
+                f"Expected JSON array from vault '{self.name}' during {operation}, "
+                f"got {type(body).__name__}."
+            )
+        return body
+
     def _raise_for_status(
         self,
         response: httpx.Response,
@@ -296,7 +310,21 @@ class ObsidianVaultClient:
         response = await self._request("GET", url, operation="list_directory")
         self._raise_for_status(response, "list_directory", path)
         body = self._parse_json(response, "list_directory")
-        return list(body.get("files", []) if isinstance(body, dict) else [])
+        # Plugin spec: 2xx body is an object with a `files` array. Validate
+        # both layers so an upstream/proxy contract breakage surfaces as a
+        # ToolError instead of a misleading "empty directory" result.
+        if not isinstance(body, dict):
+            raise ToolError(
+                f"Expected JSON object from vault '{self.name}' during list_directory "
+                f"at '{path}', got {type(body).__name__}."
+            )
+        files = body.get("files")
+        if not isinstance(files, list):
+            raise ToolError(
+                f"Expected 'files' to be a JSON array from vault '{self.name}' "
+                f"during list_directory at '{path}', got {type(files).__name__}."
+            )
+        return list(files)
 
     async def search_simple(self, query: str, context_length: int) -> list[dict]:
         response = await self._request(
@@ -307,7 +335,7 @@ class ObsidianVaultClient:
         )
         self._raise_for_status(response, "search_simple")
         body = self._parse_json(response, "search_simple")
-        return body if isinstance(body, list) else []
+        return self._require_list(body, "search_simple")
 
     async def search_jsonlogic(self, query: dict) -> list[dict]:
         response = await self._request(
@@ -319,7 +347,7 @@ class ObsidianVaultClient:
         )
         self._raise_for_status(response, "search_jsonlogic")
         body = self._parse_json(response, "search_jsonlogic")
-        return body if isinstance(body, list) else []
+        return self._require_list(body, "search_jsonlogic")
 
     async def search_dataview(
         self, query: str, context_length: int = 100
@@ -345,4 +373,4 @@ class ObsidianVaultClient:
                 return fallback, "Dataview not available, fell back to text search"
         self._raise_for_status(response, "search_dataview")
         body = self._parse_json(response, "search_dataview")
-        return (body if isinstance(body, list) else []), None
+        return self._require_list(body, "search_dataview"), None

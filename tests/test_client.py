@@ -262,6 +262,31 @@ class TestListDirectory:
         assert result == ["a.md", "b/"]
 
 
+class TestListDirectoryShapeValidation:
+    """A 2xx response that isn't an object-with-files-array must raise
+    ToolError instead of silently returning an empty list — otherwise
+    plugin/proxy contract breakage would masquerade as 'empty directory'."""
+
+    async def test_non_dict_body_raises(self):
+        def handler(_request):
+            return httpx.Response(200, json=[1, 2, 3])
+
+        async with make_client(handler) as client:
+            with pytest.raises(ToolError) as exc_info:
+                await client.list_directory("notes")
+        assert "Expected JSON object" in str(exc_info.value)
+
+    async def test_files_not_a_list_raises(self):
+        def handler(_request):
+            return httpx.Response(200, json={"files": "not-a-list"})
+
+        async with make_client(handler) as client:
+            with pytest.raises(ToolError) as exc_info:
+                await client.list_directory("notes")
+        assert "files" in str(exc_info.value).lower()
+        assert "JSON array" in str(exc_info.value)
+
+
 class TestSearchSimple:
     async def test_query_in_url_params(self):
         seen = {}
@@ -302,6 +327,42 @@ class TestSearchJsonLogic:
         assert seen["content-type"] == "application/vnd.olrapi.jsonlogic+json"
         assert seen["body"] == {"in": ["tag", {"var": "tags"}]}
         assert result == [{"filename": "a.md", "result": True}]
+
+
+class TestSearchShapeValidation:
+    """Every search method must raise ToolError on a non-array 2xx body
+    instead of silently returning [], which would conflate 'no matches'
+    with 'upstream contract breakage'."""
+
+    async def test_simple_non_list_body_raises(self):
+        def handler(_request):
+            return httpx.Response(200, json={"unexpected": "object"})
+
+        async with make_client(handler) as client:
+            with pytest.raises(ToolError) as exc_info:
+                await client.search_simple("q", context_length=100)
+        assert "Expected JSON array" in str(exc_info.value)
+        assert "search_simple" in str(exc_info.value)
+
+    async def test_jsonlogic_non_list_body_raises(self):
+        def handler(_request):
+            return httpx.Response(200, json={"unexpected": "object"})
+
+        async with make_client(handler) as client:
+            with pytest.raises(ToolError) as exc_info:
+                await client.search_jsonlogic({"in": ["x", {"var": "tags"}]})
+        assert "Expected JSON array" in str(exc_info.value)
+        assert "search_jsonlogic" in str(exc_info.value)
+
+    async def test_dataview_non_list_body_raises(self):
+        def handler(_request):
+            return httpx.Response(200, json="unexpected scalar")
+
+        async with make_client(handler) as client:
+            with pytest.raises(ToolError) as exc_info:
+                await client.search_dataview("TABLE FROM #x")
+        assert "Expected JSON array" in str(exc_info.value)
+        assert "search_dataview" in str(exc_info.value)
 
 
 class TestSearchDataview:
