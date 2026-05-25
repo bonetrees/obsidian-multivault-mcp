@@ -55,10 +55,15 @@ class ObsidianVaultClient:
         name: str,
         base_url: str,
         api_key: str,
-        verify_ssl: bool = False,
+        verify_ssl: bool = True,
         timeout: float | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
+        # verify_ssl defaults to True so the constructor is safe-by-default.
+        # The server lifespan explicitly passes the loopback-derived value
+        # from VaultConfig.verify_ssl; a future call site that forgets to
+        # plumb it through gets TLS verification on, which is the right
+        # failure mode for any non-loopback HTTPS plugin instance.
         self.name = name
         self.base_url = base_url
         self._timeout = timeout if timeout is not None else self._resolve_timeout_env()

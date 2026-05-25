@@ -418,6 +418,19 @@ class TestMalformedJsonSuccessResponse:
         assert "test" in msg  # vault name in message
 
 
+class TestVerifySslDefault:
+    """Constructor must be safe-by-default — a caller that forgets to pass
+    verify_ssl ends up with TLS verification ON, not OFF."""
+
+    def test_default_is_true(self):
+        client = ObsidianVaultClient(
+            name="t", base_url="https://example.com:27124", api_key="k"
+        )
+        # The flag is plumbed into httpx as `verify`; we read back the kwarg
+        # we stored so we don't have to crack open httpx internals.
+        assert client._client_kwargs["verify"] is True  # pylint: disable=protected-access
+
+
 class TestEnvTimeoutFallback:
     """OBSIDIAN_MCP_TIMEOUT should not crash startup on garbage values."""
 
