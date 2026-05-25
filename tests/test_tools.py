@@ -436,6 +436,39 @@ class TestSearchAllVaults:
         assert rbv["broken"]["error"]
 
 
+class TestSearchAllVaultsPropagatesCancellation:
+    """asyncio.CancelledError must propagate out of _one_vault, not be turned
+    into a per-vault 'error' result — otherwise cooperative cancellation
+    (request abort, server shutdown) would stall."""
+
+    @pytest.fixture
+    def vault_handlers(self):
+        # Need at least one configured vault for the fixture machinery.
+        def vault(_request):
+            return httpx.Response(200, json=[])
+
+        return {"v": vault}
+
+    async def test_cancellederror_propagates(self):
+        # Call _one_vault directly with a client that awaits an
+        # already-cancelled future, so the body of run_search raises
+        # CancelledError. The wrapper must let it through.
+        import asyncio  # noqa: PLC0415
+
+        from obsidian_multivault_mcp.tools.search_all_vaults import (  # noqa: PLC0415
+            _one_vault,
+        )
+
+        class StubClient:
+            name = "v"
+
+            async def search_simple(self, *_args, **_kwargs):
+                raise asyncio.CancelledError()
+
+        with pytest.raises(asyncio.CancelledError):
+            await _one_vault("v", StubClient(), "text", "q", 100)
+
+
 class TestSearchAllVaultsIsolatesUnexpectedExceptions:
     """A vault that triggers a non-ToolError must not fail the whole fan-out."""
 

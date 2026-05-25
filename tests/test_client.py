@@ -117,6 +117,20 @@ class TestReadNote:
         assert "test" in msg  # vault name in message
         assert "read_note" in msg  # operation context
 
+    async def test_read_note_non_dict_response_raises(self):
+        # Plugin spec promises an object for vnd.olrapi.note+json. A list
+        # response (e.g. via a confused proxy) would otherwise crash the
+        # curator with AttributeError on body.get(...).
+        def handler(_request):
+            return httpx.Response(200, json=["unexpected", "list"])
+
+        async with make_client(handler) as client:
+            with pytest.raises(ToolError) as exc_info:
+                await client.read_note("foo.md")
+        msg = str(exc_info.value)
+        assert "Expected JSON object" in msg
+        assert "list" in msg
+
     async def test_401_raises_toolerror_with_api_key_hint(self):
         def handler(_request):
             return httpx.Response(401, json={"errorCode": 40100, "message": "Unauthorized"})
@@ -423,9 +437,7 @@ class TestVerifySslDefault:
     verify_ssl ends up with TLS verification ON, not OFF."""
 
     def test_default_is_true(self):
-        client = ObsidianVaultClient(
-            name="t", base_url="https://example.com:27124", api_key="k"
-        )
+        client = ObsidianVaultClient(name="t", base_url="https://example.com:27124", api_key="k")
         # The flag is plumbed into httpx as `verify`; we read back the kwarg
         # we stored so we don't have to crack open httpx internals.
         assert client._client_kwargs["verify"] is True  # pylint: disable=protected-access

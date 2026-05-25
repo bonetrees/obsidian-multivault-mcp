@@ -22,6 +22,15 @@ async def _one_vault(name, client, search_type, query, context_length) -> tuple[
             "warning": warning,
             "error": None,
         }
+    # Cooperative cancellation (request abort, server shutdown) must propagate
+    # so the surrounding gather() / lifespan can unwind. Don't convert it into
+    # a per-vault "error" result. CancelledError is a BaseException in
+    # Python 3.8+ so the broad except below wouldn't actually catch it, but
+    # the explicit re-raise documents the intent and protects against future
+    # regressions (e.g. if asyncio ever moves CancelledError back under
+    # Exception, or if a contributor adds a `except BaseException`).
+    except asyncio.CancelledError:  # pylint: disable=try-except-raise
+        raise
     except Exception as exc:  # pylint: disable=broad-exception-caught
         # Per-vault isolation: never let one vault's failure kill the whole fan-out.
         # Catch broadly (not just ToolError) so unexpected runtime errors stay scoped

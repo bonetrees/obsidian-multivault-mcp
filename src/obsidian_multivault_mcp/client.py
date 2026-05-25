@@ -229,7 +229,16 @@ class ObsidianVaultClient:
             headers={"Accept": "application/vnd.olrapi.note+json"},
         )
         self._raise_for_status(response, "read_note", path)
-        return self._parse_json(response, "read_note")
+        body = self._parse_json(response, "read_note")
+        if not isinstance(body, dict):
+            # The plugin spec promises an object for the note+json Accept type.
+            # Validating here means the curator can rely on `.get()` access
+            # instead of crashing with AttributeError on a misbehaving proxy.
+            raise ToolError(
+                f"Expected JSON object from vault '{self.name}' read_note at '{path}', "
+                f"got {type(body).__name__}."
+            )
+        return body
 
     async def write_note(self, path: str, content: str) -> None:
         response = await self._request(
