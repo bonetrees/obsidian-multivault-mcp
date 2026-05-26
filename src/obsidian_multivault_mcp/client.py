@@ -299,6 +299,23 @@ class ObsidianVaultClient:
                     f"Expected '{field_name}' to be a JSON {type_label} from vault "
                     f"'{self.name}' during read_note{location}, got {type(value).__name__}."
                 )
+        # stat subfields feed arithmetic in epoch_ms_to_iso — wrong types here
+        # would raise TypeError out of the curator and break the
+        # "only ToolError escapes" contract.
+        stat = body.get("stat")
+        if isinstance(stat, dict):
+            for sub in ("ctime", "mtime", "size"):
+                value = stat.get(sub)
+                if value is None:
+                    continue
+                # JSON numbers are int or float; bool is an int subclass but
+                # shouldn't be accepted as a timestamp/size.
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    raise ToolError(
+                        f"Expected 'stat.{sub}' to be a number from vault "
+                        f"'{self.name}' during read_note{location}, "
+                        f"got {type(value).__name__}."
+                    )
         return body
 
     async def write_note(self, path: str, content: str) -> None:

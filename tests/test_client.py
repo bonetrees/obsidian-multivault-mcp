@@ -171,6 +171,38 @@ class TestReadNote:
             result = await client.read_note("foo.md")
         assert result == {"content": "body"}
 
+    @pytest.mark.parametrize("subfield", ["ctime", "mtime", "size"])
+    async def test_read_note_stat_subfield_type_mismatch_raises(self, subfield):
+        # epoch_ms_to_iso does arithmetic on ctime/mtime; size hits the
+        # curator's stat dict. Wrong types here would TypeError out of
+        # the curator, breaking the "only ToolError escapes" contract.
+        def handler(_request):
+            stat = {"ctime": 1700000000000, "mtime": 1700000001000, "size": 100}
+            stat[subfield] = "not-a-number"
+            return httpx.Response(200, json={"content": "body", "stat": stat})
+
+        async with make_client(handler) as client:
+            with pytest.raises(ToolError) as exc_info:
+                await client.read_note("foo.md")
+        msg = str(exc_info.value)
+        assert f"stat.{subfield}" in msg
+        assert "number" in msg
+
+    async def test_read_note_stat_subfield_bool_rejected(self):
+        # bool is an int subclass; would silently be accepted as 0/1 ms
+        # otherwise. Explicit rejection.
+        def handler(_request):
+            return httpx.Response(
+                200,
+                json={"content": "body", "stat": {"ctime": True}},
+            )
+
+        async with make_client(handler) as client:
+            with pytest.raises(ToolError) as exc_info:
+                await client.read_note("foo.md")
+        assert "stat.ctime" in str(exc_info.value)
+        assert "bool" in str(exc_info.value)
+
     async def test_401_raises_toolerror_with_api_key_hint(self):
         def handler(_request):
             return httpx.Response(401, json={"errorCode": 40100, "message": "Unauthorized"})

@@ -1,19 +1,16 @@
-"""CLI entry point. Loads .env, parses args, runs FastMCP on the chosen transport."""
+"""CLI entry point. Loads .env, parses args, runs FastMCP on the chosen transport.
+
+Importing this module is side-effect-free — `load_dotenv` and logger setup
+both run inside `main()`. That keeps tests and other modules that import
+helper functions (`_env_int`, `_parse_args`, `_strip_host_brackets`) from
+inadvertently mutating the process environment.
+"""
 
 import argparse
 import os
 import sys
 
-from dotenv import load_dotenv
-
-# load_dotenv must run before anything that reads OBSIDIAN_* env vars.
-load_dotenv(override=True)
-
-# pylint: disable=wrong-import-position
 from . import __version__
-from .logging_config import setup_logging
-
-logger = setup_logging("obsidian-multivault-mcp")
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -84,6 +81,21 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.config:
         os.environ["OBSIDIAN_MCP_CONFIG"] = args.config
+
+    # Load .env and set up the package logger only at actual CLI execution.
+    # Module-level dotenv loading would mutate the process environment as a
+    # side effect of `import obsidian_multivault_mcp.__main__`. Both must
+    # happen before any further imports that read OBSIDIAN_* env vars
+    # (config / client / logging) at construction time.
+    # pylint: disable-next=import-outside-toplevel
+    from dotenv import load_dotenv
+
+    load_dotenv(override=True)
+
+    # pylint: disable-next=import-outside-toplevel
+    from .logging_config import setup_logging
+
+    logger = setup_logging("obsidian-multivault-mcp")
 
     # `is not None` rather than `or`: --port 0 (or an explicit empty --host "")
     # would otherwise fall through to the env/default. argparse stores None
