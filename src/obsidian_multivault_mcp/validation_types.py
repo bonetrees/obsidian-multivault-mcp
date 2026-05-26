@@ -62,7 +62,7 @@ def validate_vault_file_path(value: object) -> str:
     return cleaned
 
 
-def _reject_non_int_context_length(value):
+def _reject_non_int_context_length(value: object) -> int:
     """Pydantic BeforeValidator: reject non-int (incl. bool) before coercion.
 
     Without this, JSON ``true`` / Python ``True`` would coerce to 1 and then

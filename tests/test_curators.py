@@ -164,6 +164,30 @@ class TestCurateSimpleMatch:
         result = curate_simple_match(raw)
         assert result["context"] == [""]
 
+    def test_non_list_matches_silently_skipped(self):
+        # If matches is a string (misbehaving proxy) the curator shouldn't
+        # iterate it character-by-character and AttributeError on `.get`.
+        # Silent-skip is the right degradation here — search context is a
+        # presentation concern, not a contract one.
+        raw = {"filename": "a.md", "matches": "not-a-list"}
+        result = curate_simple_match(raw)
+        assert result["context"] == []
+        assert result["path"] == "a.md"
+
+    def test_non_dict_element_skipped(self):
+        # Drop bad elements rather than crash. The good element is kept.
+        raw = {
+            "filename": "a.md",
+            "matches": ["junk", {"match": {}, "context": "good"}, 42],
+        }
+        result = curate_simple_match(raw)
+        assert result["context"] == ["good"]
+
+    def test_non_string_context_skipped(self):
+        raw = {"filename": "a.md", "matches": [{"context": 123}, {"context": "ok"}]}
+        result = curate_simple_match(raw)
+        assert result["context"] == ["ok"]
+
 
 class TestCurateStructuredMatch:
     def test_jsonlogic_drops_result(self):

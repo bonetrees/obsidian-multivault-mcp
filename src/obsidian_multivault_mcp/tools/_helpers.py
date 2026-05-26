@@ -28,11 +28,30 @@ def epoch_ms_to_iso(ms: int | None) -> str | None:
 
 
 def curate_simple_match(raw: dict) -> dict:
-    """Curate one result entry from POST /search/simple/."""
+    """Curate one result entry from POST /search/simple/.
+
+    Defensive about the nested ``matches`` shape: the client validates
+    the top-level list-of-dicts, but each result's ``matches`` field is a
+    plugin-internal structure that a misbehaving proxy could mangle.
+    Silent-skip bad elements rather than \\:code:`AttributeError`-ing out
+    of the curator — search is a presentation concern, not a contract one,
+    and an empty ``context`` is a survivable degradation.
+    """
+    matches_raw = raw.get("matches")
+    matches: list[dict] = matches_raw if isinstance(matches_raw, list) else []
+    context: list[str] = []
+    for m in matches:
+        if not isinstance(m, dict):
+            continue
+        ctx = m.get("context")
+        if isinstance(ctx, str):
+            context.append(ctx)
+        elif ctx is None:
+            context.append("")
     return {
         "path": raw.get("filename", ""),
         "score": raw.get("score"),
-        "context": [(m.get("context") or "") for m in (raw.get("matches") or [])],
+        "context": context,
     }
 
 
