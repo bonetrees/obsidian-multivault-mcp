@@ -19,13 +19,13 @@ tools for vault discovery, CRUD, search, and surgical patching.
 Each vault you want to expose needs the **Local REST API** plugin
 installed and configured individually in Obsidian.
 
-For each vault, open Obsidian and go to *Settings → Community Plugins →
-Local REST API → Options*:
+For each vault, open Obsidian and go to *Settings → Local REST API*:
 
 1. **Copy the API key** — you'll paste this into your `.env` file.
 2. **Set a unique port** under *Advanced*. Each vault must listen on its
-   own port (e.g. vault A on 27123, vault B on 27124). The port in the
-   plugin must match the `port` value in your YAML config.
+   own port (e.g. vault A on 27124, vault B on 27125, matching the
+   HTTPS-default examples below). The port in the plugin must match the
+   `port` value in your YAML config.
 3. **If using HTTP:** toggle *"Enable non-encrypted (HTTP) server"* on.
    This is under the *Advanced* section. HTTP avoids self-signed
    certificate complexity and is fine for localhost.
@@ -114,12 +114,41 @@ poetry run python -m obsidian_multivault_mcp --config ./other.yaml    # custom c
 
 ## Claude Desktop
 
-Claude Desktop does not natively support streamable-http in
-`claude_desktop_config.json`. Use
-[mcp-remote](https://www.npmjs.com/package/mcp-remote) to bridge:
+Claude Desktop only speaks stdio in `claude_desktop_config.json`, so
+there are two ways to wire it up:
 
-1. Start the server: `poetry run python -m obsidian_multivault_mcp`
-2. Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+- **Direct stdio (simplest).** Claude Desktop spawns the server itself
+  as a child process. Recommended for a single-client setup.
+- **Bridge via `mcp-remote`.** Run the server once on streamable-http
+  and have Claude Desktop connect through
+  [mcp-remote](https://www.npmjs.com/package/mcp-remote). Useful when
+  you want to share one server with multiple clients (e.g. Claude
+  Desktop + an IDE) or run the server on a different machine.
+
+The config file lives at:
+
+- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+- Linux: `~/.config/Claude/claude_desktop_config.json`
+
+### Direct stdio
+
+```json
+{
+  "mcpServers": {
+    "obsidian-multivault-mcp": {
+      "command": "poetry",
+      "args": ["run", "python", "-m", "obsidian_multivault_mcp", "--transport", "stdio"],
+      "cwd": "/absolute/path/to/obsidian-multivault-mcp"
+    }
+  }
+}
+```
+
+### Bridge via `mcp-remote`
+
+Start the server in another terminal:
+`poetry run python -m obsidian_multivault_mcp`
 
 ```json
 {
