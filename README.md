@@ -14,6 +14,24 @@ tools for vault discovery, CRUD, search, and surgical patching.
   3.4.3** — older versions are missing the PATCH v3 endpoint and the
   `/search/simple/` endpoint this server depends on.
 
+## Plugin Setup
+
+Each vault you want to expose needs the **Local REST API** plugin
+installed and configured individually in Obsidian.
+
+For each vault, open Obsidian and go to *Settings → Community Plugins →
+Local REST API → Options*:
+
+1. **Copy the API key** — you'll paste this into your `.env` file.
+2. **Set a unique port** under *Advanced*. Each vault must listen on its
+   own port (e.g. vault A on 27123, vault B on 27124). The port in the
+   plugin must match the `port` value in your YAML config.
+3. **If using HTTP:** toggle *"Enable non-encrypted (HTTP) server"* on.
+   This is under the *Advanced* section. HTTP avoids self-signed
+   certificate complexity and is fine for localhost.
+
+Restart Obsidian (or reload the plugin) after changing port settings.
+
 ## Quickstart
 
 ```bash
@@ -40,7 +58,7 @@ Two files drive configuration:
 2. **`.env`** — API keys. Generate one in Obsidian under *Settings →
    Local REST API* for each vault and copy it into the matching env var.
 
-Example YAML:
+Example YAML (HTTPS — plugin default):
 
 ```yaml
 vaults:
@@ -51,6 +69,22 @@ vaults:
     api_key_env: "OBSIDIAN_DEVPROJECTS_API_KEY"
   personal:
     scheme: "https"
+    host: "127.0.0.1"
+    port: 27125
+    api_key_env: "OBSIDIAN_PERSONAL_API_KEY"
+```
+
+Example YAML (HTTP — requires enabling the insecure server in plugin settings):
+
+```yaml
+vaults:
+  devprojects:
+    scheme: "http"
+    host: "127.0.0.1"
+    port: 27123
+    api_key_env: "OBSIDIAN_DEVPROJECTS_API_KEY"
+  personal:
+    scheme: "http"
     host: "127.0.0.1"
     port: 27124
     api_key_env: "OBSIDIAN_PERSONAL_API_KEY"
@@ -77,6 +111,28 @@ poetry run python -m obsidian_multivault_mcp --transport sse
 poetry run python -m obsidian_multivault_mcp --transport stdio        # for Claude Desktop
 poetry run python -m obsidian_multivault_mcp --config ./other.yaml    # custom config path
 ```
+
+## Claude Desktop
+
+Claude Desktop does not natively support streamable-http in
+`claude_desktop_config.json`. Use
+[mcp-remote](https://www.npmjs.com/package/mcp-remote) to bridge:
+
+1. Start the server: `poetry run python -m obsidian_multivault_mcp`
+2. Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "obsidian-multivault-mcp": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "http://127.0.0.1:8100/mcp"]
+    }
+  }
+}
+```
+
+Restart Claude Desktop after editing the config.
 
 ## Tools
 
