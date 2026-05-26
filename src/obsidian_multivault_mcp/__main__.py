@@ -100,6 +100,19 @@ def main(argv: list[str] | None = None) -> int:
 
     logger = setup_logging("obsidian-multivault-mcp")
 
+    # Imports happen after dotenv + arg parsing so config/env are ready.
+    # pylint: disable=import-outside-toplevel
+    from .server import mcp
+    from . import tools  # noqa: F401  pylint: disable=unused-import,import-outside-toplevel
+
+    if args.transport == "stdio":
+        # stdio doesn't bind to a host/port, so don't touch
+        # OBSIDIAN_MCP_HOST / OBSIDIAN_MCP_PORT. A malformed
+        # OBSIDIAN_MCP_PORT shouldn't be able to crash stdio startup
+        # when the value is unused.
+        mcp.run(transport="stdio")
+        return 0
+
     # `is not None` rather than `or`: --port 0 (or an explicit empty --host "")
     # would otherwise fall through to the env/default. argparse stores None
     # when the flag is omitted, so a falsy-but-set value is meaningful here.
@@ -114,7 +127,7 @@ def main(argv: list[str] | None = None) -> int:
     # pylint: disable-next=import-outside-toplevel
     from .config import _is_loopback_host
 
-    if args.transport != "stdio" and not _is_loopback_host(host):
+    if not _is_loopback_host(host):
         logger.warning(
             "Binding %s on non-loopback host %s. The server has no auth — "
             "only do this on a trusted network.",
@@ -122,15 +135,7 @@ def main(argv: list[str] | None = None) -> int:
             host,
         )
 
-    # Imports happen after dotenv + arg parsing so config/env are ready.
-    # pylint: disable=import-outside-toplevel
-    from .server import mcp
-    from . import tools  # noqa: F401  pylint: disable=unused-import,import-outside-toplevel
-
-    if args.transport == "stdio":
-        mcp.run(transport="stdio")
-    else:
-        mcp.run(transport=args.transport, host=host, port=port)
+    mcp.run(transport=args.transport, host=host, port=port)
     return 0
 
 

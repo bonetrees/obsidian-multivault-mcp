@@ -70,6 +70,35 @@ class TestStripHostBrackets:
         assert _strip_host_brackets("[]") == "[]"
 
 
+class TestStdioIgnoresHostPortEnv:
+    """stdio transport doesn't bind to host/port. A malformed
+    OBSIDIAN_MCP_PORT must not crash stdio startup just because we read
+    a value that's never used."""
+
+    def test_bad_port_env_does_not_crash_stdio(self, monkeypatch):
+        # Garbage port value would SystemExit out of _env_int on HTTP
+        # transports — but stdio should never reach that code path.
+        monkeypatch.setenv("OBSIDIAN_MCP_PORT", "definitely-not-a-port")
+
+        # Capture mcp.run kwargs without actually starting the server.
+        captured: dict = {}
+
+        def fake_run(**kwargs):
+            captured["kwargs"] = kwargs
+
+        # pylint: disable=import-outside-toplevel
+        from obsidian_multivault_mcp import server as server_module
+
+        with patch("dotenv.load_dotenv"):
+            with patch.object(server_module.mcp, "run", side_effect=fake_run):
+                rc = main(["--transport", "stdio"])
+
+        assert rc == 0
+        # Confirm mcp.run was called with transport=stdio and NOTHING ELSE.
+        # (No host/port — stdio doesn't bind.)
+        assert captured["kwargs"] == {"transport": "stdio"}
+
+
 class TestConfigFlagPrecedence:
     """--config must override even when .env defines OBSIDIAN_MCP_CONFIG —
     the CLI flag is the user's explicit highest-priority intent."""
