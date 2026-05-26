@@ -87,17 +87,23 @@ class TestConfigFlagPrecedence:
         def fake_load_dotenv(**_kwargs):
             os.environ["OBSIDIAN_MCP_CONFIG"] = str(dotenv_path)
 
-        # Stub mcp.run so main() doesn't actually start the server.
-        captured = {}
+        # Capture what main() ultimately calls mcp.run with. Patch the
+        # bound .run method on the existing FastMCP instance rather than
+        # replacing the instance — replacing it would break the in-process
+        # @mcp.tool registrations and only happens to work today because
+        # conftest auto-imports the tools before this test runs.
+        captured: dict = {}
 
-        class FakeMCP:
-            def run(self, **kwargs):
-                captured["resolved_config"] = os.environ.get("OBSIDIAN_MCP_CONFIG")
-                captured["transport"] = kwargs.get("transport")
+        def fake_run(**kwargs):
+            captured["resolved_config"] = os.environ.get("OBSIDIAN_MCP_CONFIG")
+            captured["transport"] = kwargs.get("transport")
+
+        # pylint: disable=import-outside-toplevel
+        from obsidian_multivault_mcp import server as server_module
 
         monkeypatch.delenv("OBSIDIAN_MCP_CONFIG", raising=False)
         with patch("dotenv.load_dotenv", side_effect=fake_load_dotenv):
-            with patch("obsidian_multivault_mcp.server.mcp", FakeMCP()):
+            with patch.object(server_module.mcp, "run", side_effect=fake_run):
                 rc = main(["--transport", "stdio", "--config", str(cli_path)])
         assert rc == 0
         assert captured["resolved_config"] == str(cli_path)  # CLI won
