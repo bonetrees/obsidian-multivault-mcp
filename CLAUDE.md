@@ -1,4 +1,4 @@
-date: '2026-05-25'
+date: '2026-05-26'
 
 # Obsidian MCP Server
 
@@ -20,12 +20,12 @@ MCP server providing multi-vault Obsidian access through the obsidian-local-rest
 ```
 src/obsidian_multivault_mcp/
 ├── __init__.py          # Version metadata
-├── __main__.py          # CLI: argparse, load_dotenv, --transport, --config, security warning
-├── server.py            # FastMCP instance, lifespan, get_client(ctx, vault), get_all_clients(ctx)
-├── client.py            # ObsidianVaultClient: httpx async, per-vault, all REST API methods
-├── config.py            # YAML config loader, VaultConfig dataclass, API key resolution
-├── validation_types.py  # VaultName, VaultPath, PatchOperation, PatchTargetType, SearchType, ClampedContextLength
-├── logging_config.py    # Centralized stdlib logging
+├── __main__.py          # CLI: argparse, --transport, --config; load_dotenv + setup_logging run inside main()
+├── server.py            # FastMCP instance, LifespanContext TypedDict, lifespan, get_client(ctx, vault), get_all_clients(ctx)
+├── client.py            # ObsidianVaultClient: httpx async, per-vault, all REST API methods; NotFound subclass
+├── config.py            # YAML config loader, VaultConfig dataclass, _is_loopback_host, API key resolution
+├── validation_types.py  # VaultName, VaultPath, VaultFilePath, PatchOperation, PatchTargetType, SearchType, ClampedContextLength
+├── logging_config.py    # Centralised stdlib logging, scoped to the package logger
 └── tools/
     ├── __init__.py      # pkgutil auto-discovery: imports every non-_-prefixed module → @mcp.tool() runs
     ├── _helpers.py      # Shared curators: strip_frontmatter, epoch_ms_to_iso, curate_*_match
@@ -36,12 +36,15 @@ src/obsidian_multivault_mcp/
     ├── append_note.py
     ├── patch_note.py    # Surgical heading/block/frontmatter targeting
     ├── delete_note.py
-    ├── search_vault.py  # Text, JsonLogic, Dataview DQL (with fallback)
-    └── search_all_vaults.py  # Parallel fan-out across all vaults
+    ├── search_vault.py  # Text, JsonLogic (parse_jsonlogic_query helper), Dataview DQL (with fallback)
+    └── search_all_vaults.py  # Parallel fan-out; eager jsonlogic input validation before fan-out
 tests/
 ├── __init__.py
-├── conftest.py          # Mock client fixtures, pkgutil auto-discovery
+├── conftest.py          # Mock client fixtures, FastMCP Client + mcp._lifespan swap
 ├── test_validation_types.py
+├── test_config.py       # YAML loader, _is_loopback_host, base_url IPv6 bracketing
+├── test_logging_config.py
+├── test_main.py         # CLI helpers (_env_int, _parse_args, _strip_host_brackets) and main() integration
 ├── test_curators.py
 ├── test_client.py       # httpx.MockTransport
 └── test_tools.py        # FastMCP Client(mcp) integration
@@ -49,7 +52,7 @@ tests/
 
 ## Key Patterns
 
-- **Env var loading.** `python-dotenv` with `load_dotenv(override=True)` in `__main__.py` before any imports that read env vars. API keys read via `os.environ[config.api_key_env]` during config loading. Do NOT use `python-decouple`.
+- **Env var loading.** `python-dotenv` with `load_dotenv(override=True)` runs *inside* `main()` (not at module import) so importing `obsidian_multivault_mcp.__main__` is side-effect-free for tests and library consumers. It still runs before any further imports that read `OBSIDIAN_*` env vars (config / client / logging are all imported lazily after dotenv). `--config` is applied to `os.environ` *after* `load_dotenv` so the CLI flag takes precedence over `.env`. API keys read via `os.environ[config.api_key_env]` during config loading. Do NOT use `python-decouple`.
 
 - **Multi-vault config.** YAML file path set via `OBSIDIAN_MCP_CONFIG` env var. Each vault entry has `scheme`, `host`, `port`, `api_key_env`. Keys never stored in YAML — `api_key_env` names the env var holding the key. Config loaded and validated at lifespan startup.
 
@@ -179,7 +182,7 @@ If any of these diverges from the docs, the mock-based tests are lying. Open an 
 | `OBSIDIAN_MCP_TIMEOUT` | `30` | Default HTTP timeout in seconds |
 | `OBSIDIAN_{VAULT}_API_KEY` | _(required per vault)_ | API key for each vault (env var name configured in YAML) |
 
-Loaded via `python-dotenv` with `load_dotenv(override=True)` in `__main__.py`.
+Loaded via `python-dotenv` with `load_dotenv(override=True)` inside `main()` (not at module import time — see *Env var loading* above).
 
 ## Dependencies
 
