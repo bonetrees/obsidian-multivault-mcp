@@ -131,6 +131,46 @@ class TestReadNote:
         assert "Expected JSON object" in msg
         assert "list" in msg
 
+    @pytest.mark.parametrize(
+        ("field", "bad_value", "type_label"),
+        [
+            ("content", 42, "string"),
+            ("frontmatter", "not-a-dict", "object"),
+            ("tags", "single-tag-not-list", "array"),
+            ("stat", ["arr", "not", "dict"], "object"),
+        ],
+    )
+    async def test_read_note_field_type_mismatch_raises(self, field, bad_value, type_label):
+        # Each field is optional, but if present must be the right type —
+        # otherwise the curator hits TypeError / AttributeError / silent
+        # garbage. Catch it at the client boundary.
+        def handler(_request):
+            body = {
+                "content": "ok",
+                "frontmatter": {},
+                "tags": [],
+                "stat": {},
+            }
+            body[field] = bad_value
+            return httpx.Response(200, json=body)
+
+        async with make_client(handler) as client:
+            with pytest.raises(ToolError) as exc_info:
+                await client.read_note("foo.md")
+        msg = str(exc_info.value)
+        assert field in msg
+        assert type_label in msg
+        assert type(bad_value).__name__ in msg
+
+    async def test_read_note_field_absent_ok(self):
+        # Missing optional fields are fine — only wrong-typed presence raises.
+        def handler(_request):
+            return httpx.Response(200, json={"content": "body"})  # no frontmatter/tags/stat
+
+        async with make_client(handler) as client:
+            result = await client.read_note("foo.md")
+        assert result == {"content": "body"}
+
     async def test_401_raises_toolerror_with_api_key_hint(self):
         def handler(_request):
             return httpx.Response(401, json={"errorCode": 40100, "message": "Unauthorized"})
@@ -591,6 +631,19 @@ class TestEnvTimeoutFallback:
             name="t", base_url="https://127.0.0.1:27124", api_key="k", verify_ssl=False
         )
         assert client._timeout == 5.0  # pylint: disable=protected-access
+
+    @pytest.mark.parametrize("bad", ["0", "-1", "-0.5", "nan", "inf", "-inf"])
+    def test_non_positive_or_non_finite_falls_back(self, monkeypatch, bad):
+        # httpx.Timeout(0) or Timeout(-1) or Timeout(nan) all raise at
+        # client construction time — bringing down the server at lifespan
+        # startup. _resolve_timeout_env must fall back to DEFAULT_TIMEOUT.
+        monkeypatch.setenv("OBSIDIAN_MCP_TIMEOUT", bad)
+        client = ObsidianVaultClient(
+            name="t", base_url="https://127.0.0.1:27124", api_key="k", verify_ssl=False
+        )
+        assert (
+            client._timeout == ObsidianVaultClient.DEFAULT_TIMEOUT
+        )  # pylint: disable=protected-access
 
 
 class TestLifecycle:

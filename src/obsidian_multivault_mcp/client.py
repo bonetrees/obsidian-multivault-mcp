@@ -5,6 +5,7 @@ single REST endpoint and raises ToolError on transport or HTTP failure.
 """
 
 import json
+import math
 import os
 import urllib.parse
 from typing import Any
@@ -40,7 +41,7 @@ class ObsidianVaultClient:
         if raw is None or raw == "":
             return cls.DEFAULT_TIMEOUT
         try:
-            return float(raw)
+            value = float(raw)
         except ValueError:
             # Don't crash the server over a mis-set env var — log and fall back.
             logger.warning(
@@ -49,6 +50,17 @@ class ObsidianVaultClient:
                 cls.DEFAULT_TIMEOUT,
             )
             return cls.DEFAULT_TIMEOUT
+        # Reject 0, negatives, NaN, ±inf — httpx.Timeout(...) would raise on
+        # construction and take the server down at lifespan startup.
+        if not math.isfinite(value) or value <= 0:
+            logger.warning(
+                "Ignoring OBSIDIAN_MCP_TIMEOUT=%r (must be a positive finite number); "
+                "using default %s.",
+                raw,
+                cls.DEFAULT_TIMEOUT,
+            )
+            return cls.DEFAULT_TIMEOUT
+        return value
 
     def __init__(
         self,
@@ -249,6 +261,16 @@ class ObsidianVaultClient:
         body = self._parse_error_body(response)
         return body.get("status") == "OK"
 
+    # vnd.olrapi.note+json response shape: each field is optional but if
+    # present must match the type listed here. Validated at the client
+    # boundary so the curator can rely on shape ("only ToolError escapes").
+    _READ_NOTE_FIELDS: tuple[tuple[str, type, str], ...] = (
+        ("content", str, "string"),
+        ("frontmatter", dict, "object"),
+        ("tags", list, "array"),
+        ("stat", dict, "object"),
+    )
+
     async def read_note(self, path: str) -> dict:
         response = await self._request(
             "GET",
@@ -258,14 +280,25 @@ class ObsidianVaultClient:
         )
         self._raise_for_status(response, "read_note", path)
         body = self._parse_json(response, "read_note")
+        location = self._format_location(path)
         if not isinstance(body, dict):
             # The plugin spec promises an object for the note+json Accept type.
             # Validating here means the curator can rely on `.get()` access
             # instead of crashing with AttributeError on a misbehaving proxy.
             raise ToolError(
                 f"Expected JSON object from vault '{self.name}' during read_note"
-                f"{self._format_location(path)}, got {type(body).__name__}."
+                f"{location}, got {type(body).__name__}."
             )
+        for field_name, expected_type, type_label in self._READ_NOTE_FIELDS:
+            value = body.get(field_name)
+            if value is None:
+                # Field absent — fine, the curator handles missing fields.
+                continue
+            if not isinstance(value, expected_type):
+                raise ToolError(
+                    f"Expected '{field_name}' to be a JSON {type_label} from vault "
+                    f"'{self.name}' during read_note{location}, got {type(value).__name__}."
+                )
         return body
 
     async def write_note(self, path: str, content: str) -> None:
