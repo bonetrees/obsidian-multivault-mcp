@@ -301,6 +301,12 @@ class TestPatchNote:
         msg = str(exc_info.value)
         assert "Invalid PATCH target" in msg
         assert "::" in msg  # hint about delimiter included
+        # Same operation/status/errorCode context as the other error branches
+        # — so an operator who sees this in a log can locate it.
+        assert "patch_note" in msg
+        assert "doc.md" in msg
+        assert "HTTP 400" in msg
+        assert "errorCode 40080" in msg
 
 
 class TestDeleteNote:

@@ -199,7 +199,8 @@ class ObsidianVaultClient:
             )
         if code == self.INVALID_PATCH_TARGET_CODE:
             raise ToolError(
-                f"Invalid PATCH target{location} in vault '{self.name}': {msg}. "
+                f"Invalid PATCH target{location} in vault '{self.name}' during "
+                f"{operation} (HTTP {response.status_code}, errorCode {code}): {msg}. "
                 "Heading targets must use the full path from the document root, "
                 "with '::' as the separator (e.g. 'Report::Findings::Critical')."
             )
