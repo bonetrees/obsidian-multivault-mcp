@@ -54,6 +54,18 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _strip_host_brackets(host: str) -> str:
+    """Strip surrounding brackets from an IPv6-URL-form host.
+
+    uvicorn / starlette want bare IPv6 literals (``::1``), not URL form
+    (``[::1]``). Users may reasonably pass ``--host [::1]`` since that's
+    the URL form they see in browsers, so normalise it for binding.
+    """
+    if host.startswith("[") and host.endswith("]") and len(host) > 2:
+        return host[1:-1]
+    return host
+
+
 def _env_int(var: str, default: int) -> int:
     raw = os.environ.get(var)
     if raw is None or raw == "":
@@ -78,6 +90,8 @@ def main(argv: list[str] | None = None) -> int:
     # when the flag is omitted, so a falsy-but-set value is meaningful here.
     host = args.host if args.host is not None else os.environ.get("OBSIDIAN_MCP_HOST", "127.0.0.1")
     port = args.port if args.port is not None else _env_int("OBSIDIAN_MCP_PORT", 8100)
+
+    host = _strip_host_brackets(host)
 
     # Reuse the project-wide loopback definition rather than maintaining a
     # parallel hardcoded list (which previously missed 127.0.0.0/8, IPv6

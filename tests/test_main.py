@@ -2,7 +2,7 @@
 
 import pytest
 
-from obsidian_multivault_mcp.__main__ import _env_int, _parse_args
+from obsidian_multivault_mcp.__main__ import _env_int, _parse_args, _strip_host_brackets
 
 
 class TestEnvInt:
@@ -41,3 +41,27 @@ class TestArgsZeroValuesPreserved:
     def test_port_omitted_is_none(self):
         args = _parse_args([])
         assert args.port is None
+
+
+class TestStripHostBrackets:
+    """uvicorn wants `::1`, not `[::1]`. Users will reasonably pass the URL
+    form on the CLI — normalise it before binding."""
+
+    def test_bracketed_ipv6_stripped(self):
+        assert _strip_host_brackets("[::1]") == "::1"
+        assert _strip_host_brackets("[fe80::1]") == "fe80::1"
+
+    def test_unbracketed_passthrough(self):
+        assert _strip_host_brackets("127.0.0.1") == "127.0.0.1"
+        assert _strip_host_brackets("::1") == "::1"
+        assert _strip_host_brackets("localhost") == "localhost"
+
+    def test_partial_brackets_passthrough(self):
+        # Not a valid URL form — don't try to fix it, leave it for uvicorn
+        # to fail with a clearer error if applicable.
+        assert _strip_host_brackets("[::1") == "[::1"
+        assert _strip_host_brackets("::1]") == "::1]"
+
+    def test_empty_brackets_passthrough(self):
+        # "[]" alone (len 2) isn't a real address — don't collapse to "".
+        assert _strip_host_brackets("[]") == "[]"
