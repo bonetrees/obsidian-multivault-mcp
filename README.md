@@ -14,6 +14,24 @@ tools for vault discovery, CRUD, search, and surgical patching.
   3.4.3** — older versions are missing the PATCH v3 endpoint and the
   `/search/simple/` endpoint this server depends on.
 
+## Plugin Setup
+
+Each vault you want to expose needs the **Local REST API** plugin
+installed and configured individually in Obsidian.
+
+For each vault, open Obsidian and go to *Settings → Local REST API*:
+
+1. **Copy the API key** — you'll paste this into your `.env` file.
+2. **Set a unique port** under *Advanced*. Each vault must listen on its
+   own port (e.g. vault A on 27124, vault B on 27125, matching the
+   HTTPS-default examples below). The port in the plugin must match the
+   `port` value in your YAML config.
+3. **If using HTTP:** toggle *"Enable non-encrypted (HTTP) server"* on.
+   This is under the *Advanced* section. HTTP avoids self-signed
+   certificate complexity and is fine for localhost.
+
+Restart Obsidian (or reload the plugin) after changing port settings.
+
 ## Quickstart
 
 ```bash
@@ -40,7 +58,7 @@ Two files drive configuration:
 2. **`.env`** — API keys. Generate one in Obsidian under *Settings →
    Local REST API* for each vault and copy it into the matching env var.
 
-Example YAML:
+Example YAML (HTTPS — plugin default):
 
 ```yaml
 vaults:
@@ -51,6 +69,22 @@ vaults:
     api_key_env: "OBSIDIAN_DEVPROJECTS_API_KEY"
   personal:
     scheme: "https"
+    host: "127.0.0.1"
+    port: 27125
+    api_key_env: "OBSIDIAN_PERSONAL_API_KEY"
+```
+
+Example YAML (HTTP — requires enabling the insecure server in plugin settings):
+
+```yaml
+vaults:
+  devprojects:
+    scheme: "http"
+    host: "127.0.0.1"
+    port: 27123
+    api_key_env: "OBSIDIAN_DEVPROJECTS_API_KEY"
+  personal:
+    scheme: "http"
     host: "127.0.0.1"
     port: 27124
     api_key_env: "OBSIDIAN_PERSONAL_API_KEY"
@@ -77,6 +111,57 @@ poetry run python -m obsidian_multivault_mcp --transport sse
 poetry run python -m obsidian_multivault_mcp --transport stdio        # for Claude Desktop
 poetry run python -m obsidian_multivault_mcp --config ./other.yaml    # custom config path
 ```
+
+## Claude Desktop
+
+Claude Desktop only speaks stdio in `claude_desktop_config.json`, so
+there are two ways to wire it up:
+
+- **Direct stdio (simplest).** Claude Desktop spawns the server itself
+  as a child process. Recommended for a single-client setup.
+- **Bridge via `mcp-remote`.** Run the server once on streamable-http
+  and have Claude Desktop connect through
+  [mcp-remote](https://www.npmjs.com/package/mcp-remote). Useful when
+  you want to share one server with multiple clients (e.g. Claude
+  Desktop + an IDE) or run the server on a different machine.
+
+The config file lives at:
+
+- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+- Linux: `~/.config/Claude/claude_desktop_config.json`
+
+### Direct stdio
+
+```json
+{
+  "mcpServers": {
+    "obsidian-multivault-mcp": {
+      "command": "poetry",
+      "args": ["run", "python", "-m", "obsidian_multivault_mcp", "--transport", "stdio"],
+      "cwd": "/absolute/path/to/obsidian-multivault-mcp"
+    }
+  }
+}
+```
+
+### Bridge via `mcp-remote`
+
+Start the server in another terminal:
+`poetry run python -m obsidian_multivault_mcp`
+
+```json
+{
+  "mcpServers": {
+    "obsidian-multivault-mcp": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "http://127.0.0.1:8100/mcp"]
+    }
+  }
+}
+```
+
+Restart Claude Desktop after editing the config.
 
 ## Tools
 
