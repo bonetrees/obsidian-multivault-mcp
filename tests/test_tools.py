@@ -436,6 +436,45 @@ class TestSearchAllVaults:
         assert rbv["broken"]["error"]
 
 
+class TestSearchAllVaultsValidatesJsonLogicEagerly:
+    """Malformed jsonlogic input should raise a single ToolError before
+    fan-out, not N identical {"status": "error"} per-vault entries — that
+    asymmetry with search_vault was confusing and forced the caller to
+    deduplicate per-vault errors to recognise a single user-input bug."""
+
+    @pytest.fixture
+    def vault_handlers(self):
+        # The handlers should never actually be hit because validation
+        # fails before fan-out. Return 500 so the test fails loudly if
+        # they ever do get called.
+        def vault(_request):
+            return httpx.Response(500, text="should not be reached")
+
+        return {"alpha": vault, "beta": vault, "gamma": vault}
+
+    async def test_malformed_json_raises_single_toolerror(self, mcp_client):
+        with pytest.raises(ToolError) as exc_info:
+            await _call(
+                mcp_client,
+                "search_all_vaults",
+                {"query": "not json", "search_type": "jsonlogic"},
+            )
+        msg = str(exc_info.value)
+        assert "valid JSON" in msg
+        # No mention of per-vault structure — it's a single failure mode.
+        assert "results_by_vault" not in msg
+
+    async def test_non_object_root_raises_single_toolerror(self, mcp_client):
+        with pytest.raises(ToolError) as exc_info:
+            await _call(
+                mcp_client,
+                "search_all_vaults",
+                {"query": "[]", "search_type": "jsonlogic"},
+            )
+        msg = str(exc_info.value)
+        assert "JSON object" in msg
+
+
 class TestSearchAllVaultsPropagatesCancellation:
     """asyncio.CancelledError must propagate out of _one_vault, not be turned
     into a per-vault 'error' result — otherwise cooperative cancellation

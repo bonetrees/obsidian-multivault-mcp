@@ -7,7 +7,7 @@ from fastmcp import Context
 from ..logging_config import setup_logging
 from ..server import get_all_clients, mcp
 from ..validation_types import ClampedContextLength, SearchType
-from .search_vault import run_search
+from .search_vault import parse_jsonlogic_query, run_search
 
 logger = setup_logging("obsidian-multivault-mcp.tools.search_all_vaults")
 
@@ -71,6 +71,15 @@ async def search_all_vaults(
     Tip: call `list_vaults` first if you need to understand vault
     structure before searching, especially when picking a `search_type`.
     """
+    # Validate user-input shape ONCE, before fan-out. A malformed jsonlogic
+    # query otherwise gets caught by per-vault isolation in _one_vault and
+    # surfaces as N identical {"status": "error"} entries — confusing
+    # because it looks like every vault failed independently. Pre-parsing
+    # makes the failure mode match search_vault: a single self-correcting
+    # ToolError. The per-vault path re-parses cheaply during fan-out.
+    if search_type == "jsonlogic":
+        parse_jsonlogic_query(query)  # raises ToolError on bad input
+
     clients = get_all_clients(ctx)
     if not clients:
         return {

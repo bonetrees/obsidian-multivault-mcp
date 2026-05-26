@@ -14,6 +14,35 @@ from ..validation_types import (
 from ._helpers import curate_simple_match, curate_structured_match
 
 
+def parse_jsonlogic_query(query: str) -> dict:
+    """Parse a JsonLogic query string and validate it's a JSON object.
+
+    Raises ToolError with a self-correcting message on either failure mode.
+    Exposed (no underscore) so search_all_vaults can call this eagerly
+    before fan-out — otherwise a malformed user-input query would be
+    swallowed by per-vault isolation and surface as N identical error
+    entries instead of a single ToolError.
+    """
+    try:
+        parsed = json.loads(query)
+    except json.JSONDecodeError as exc:
+        raise ToolError(
+            f"search_type='jsonlogic' requires `query` to be a valid JSON string "
+            f"(got error: {exc.msg} at column {exc.colno}). "
+            'Example: \'{"in": ["#tag", {"var": "tags"}]}\'.'
+        ) from exc
+    # JsonLogic expressions are always JSON objects. `[]`, `true`, `"foo"`
+    # would parse cleanly but produce a vague upstream 4xx — give the
+    # caller a clear self-correcting message instead.
+    if not isinstance(parsed, dict):
+        raise ToolError(
+            f"search_type='jsonlogic' requires `query` to parse to a JSON object, "
+            f"got {type(parsed).__name__}. "
+            'Example: \'{"in": ["#tag", {"var": "tags"}]}\'.'
+        )
+    return parsed
+
+
 async def run_search(
     client, search_type: str, query: str, context_length: int
 ) -> tuple[list[dict], str | None]:
@@ -23,23 +52,7 @@ async def run_search(
         raw = await client.search_simple(query, context_length)
         return [curate_simple_match(item) for item in raw], None
     if search_type == "jsonlogic":
-        try:
-            parsed = json.loads(query)
-        except json.JSONDecodeError as exc:
-            raise ToolError(
-                f"search_type='jsonlogic' requires `query` to be a valid JSON string "
-                f"(got error: {exc.msg} at column {exc.colno}). "
-                'Example: \'{"in": ["#tag", {"var": "tags"}]}\'.'
-            ) from exc
-        # JsonLogic expressions are always JSON objects. `[]`, `true`, `"foo"`
-        # would parse cleanly but produce a vague upstream 4xx — give the
-        # caller a clear self-correcting message instead.
-        if not isinstance(parsed, dict):
-            raise ToolError(
-                f"search_type='jsonlogic' requires `query` to parse to a JSON object, "
-                f"got {type(parsed).__name__}. "
-                'Example: \'{"in": ["#tag", {"var": "tags"}]}\'.'
-            )
+        parsed = parse_jsonlogic_query(query)
         raw = await client.search_jsonlogic(parsed)
         return [curate_structured_match(item) for item in raw], None
     if search_type == "dataview":
