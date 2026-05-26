@@ -136,18 +136,27 @@ class ObsidianVaultClient:
                 f"{type(exc).__name__}: {exc}. Body started with: {snippet!r}"
             ) from exc
 
-    def _require_list(self, body: Any, operation: str) -> list:
-        """Validate that a parsed success-path body is a JSON array.
+    def _require_list_of_dicts(self, body: Any, operation: str) -> list[dict]:
+        """Validate that a parsed success-path body is a JSON array of objects.
 
-        Silently returning `[]` on a wrong-shape response would conflate
-        "no matches" with "upstream/proxy contract breakage", which makes
-        debugging painful. Raise ToolError instead.
+        Search endpoints return arrays whose elements are dicts (the
+        curators access them via ``.get("filename")``, ``.get("score")``,
+        etc.). A non-dict element would otherwise raise ``AttributeError``
+        in the tool layer and break the "only ToolError escapes" contract.
+        Validate both layers and raise ``ToolError`` naming the bad index
+        on element-level mismatch.
         """
         if not isinstance(body, list):
             raise ToolError(
                 f"Expected JSON array from vault '{self.name}' during {operation}, "
                 f"got {type(body).__name__}."
             )
+        for i, entry in enumerate(body):
+            if not isinstance(entry, dict):
+                raise ToolError(
+                    f"Expected '[{i}]' to be a JSON object from vault '{self.name}' "
+                    f"during {operation}, got {type(entry).__name__}."
+                )
         return body
 
     @staticmethod
@@ -409,7 +418,7 @@ class ObsidianVaultClient:
         )
         self._raise_for_status(response, "search_simple")
         body = self._parse_json(response, "search_simple")
-        return self._require_list(body, "search_simple")
+        return self._require_list_of_dicts(body, "search_simple")
 
     async def search_jsonlogic(self, query: dict) -> list[dict]:
         response = await self._request(
@@ -421,7 +430,7 @@ class ObsidianVaultClient:
         )
         self._raise_for_status(response, "search_jsonlogic")
         body = self._parse_json(response, "search_jsonlogic")
-        return self._require_list(body, "search_jsonlogic")
+        return self._require_list_of_dicts(body, "search_jsonlogic")
 
     async def search_dataview(
         self, query: str, context_length: int = 100
@@ -447,4 +456,4 @@ class ObsidianVaultClient:
                 return fallback, "Dataview not available, fell back to text search"
         self._raise_for_status(response, "search_dataview")
         body = self._parse_json(response, "search_dataview")
-        return self._require_list(body, "search_dataview"), None
+        return self._require_list_of_dicts(body, "search_dataview"), None

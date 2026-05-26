@@ -492,6 +492,23 @@ class TestSearchShapeValidation:
         assert "Expected JSON array" in str(exc_info.value)
         assert "search_dataview" in str(exc_info.value)
 
+    async def test_search_simple_non_dict_element_raises(self):
+        # Search curators do .get("filename"); a non-dict element would
+        # AttributeError out of the tool layer and break the
+        # "only ToolError escapes" contract.
+        def handler(_request):
+            return httpx.Response(
+                200, json=[{"filename": "a.md", "score": -0.5, "matches": []}, "stray-string"]
+            )
+
+        async with make_client(handler) as client:
+            with pytest.raises(ToolError) as exc_info:
+                await client.search_simple("q", context_length=100)
+        msg = str(exc_info.value)
+        assert "[1]" in msg
+        assert "JSON object" in msg
+        assert "str" in msg
+
 
 class TestSearchDataview:
     async def test_success_returns_no_warning(self):

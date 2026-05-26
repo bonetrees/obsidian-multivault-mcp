@@ -79,9 +79,6 @@ def _env_int(var: str, default: int) -> int:
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
 
-    if args.config:
-        os.environ["OBSIDIAN_MCP_CONFIG"] = args.config
-
     # Load .env and set up the package logger only at actual CLI execution.
     # Module-level dotenv loading would mutate the process environment as a
     # side effect of `import obsidian_multivault_mcp.__main__`. Both must
@@ -91,6 +88,12 @@ def main(argv: list[str] | None = None) -> int:
     from dotenv import load_dotenv
 
     load_dotenv(override=True)
+
+    # `--config` is applied AFTER load_dotenv so the CLI flag takes
+    # precedence even when .env defines OBSIDIAN_MCP_CONFIG. Without this
+    # ordering, dotenv's override=True would clobber the CLI value.
+    if args.config:
+        os.environ["OBSIDIAN_MCP_CONFIG"] = args.config
 
     # pylint: disable-next=import-outside-toplevel
     from .logging_config import setup_logging

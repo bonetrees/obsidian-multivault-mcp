@@ -1,8 +1,11 @@
 """Tests for the __main__ CLI entrypoint helpers."""
 
+import os
+from unittest.mock import patch
+
 import pytest
 
-from obsidian_multivault_mcp.__main__ import _env_int, _parse_args, _strip_host_brackets
+from obsidian_multivault_mcp.__main__ import _env_int, _parse_args, _strip_host_brackets, main
 
 
 class TestEnvInt:
@@ -65,3 +68,37 @@ class TestStripHostBrackets:
     def test_empty_brackets_passthrough(self):
         # "[]" alone (len 2) isn't a real address — don't collapse to "".
         assert _strip_host_brackets("[]") == "[]"
+
+
+class TestConfigFlagPrecedence:
+    """--config must override even when .env defines OBSIDIAN_MCP_CONFIG —
+    the CLI flag is the user's explicit highest-priority intent."""
+
+    def test_cli_config_wins_over_dotenv(self, monkeypatch, tmp_path):
+        # Simulate a .env that sets OBSIDIAN_MCP_CONFIG to one path; the
+        # --config flag points at another. After main() resolves args, the
+        # CLI path should be in os.environ.
+        dotenv_path = tmp_path / "from-dotenv.yaml"
+        cli_path = tmp_path / "from-cli.yaml"
+        cli_path.write_text("vaults: {}\n", encoding="utf-8")  # content doesn't matter
+
+        # Stub load_dotenv to inject the .env-derived value with override=True
+        # semantics — the round-29 bug would let this clobber args.config.
+        def fake_load_dotenv(**_kwargs):
+            os.environ["OBSIDIAN_MCP_CONFIG"] = str(dotenv_path)
+
+        # Stub mcp.run so main() doesn't actually start the server.
+        captured = {}
+
+        class FakeMCP:
+            def run(self, **kwargs):
+                captured["resolved_config"] = os.environ.get("OBSIDIAN_MCP_CONFIG")
+                captured["transport"] = kwargs.get("transport")
+
+        monkeypatch.delenv("OBSIDIAN_MCP_CONFIG", raising=False)
+        with patch("dotenv.load_dotenv", side_effect=fake_load_dotenv):
+            with patch("obsidian_multivault_mcp.server.mcp", FakeMCP()):
+                rc = main(["--transport", "stdio", "--config", str(cli_path)])
+        assert rc == 0
+        assert captured["resolved_config"] == str(cli_path)  # CLI won
+        assert captured["resolved_config"] != str(dotenv_path)
