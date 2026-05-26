@@ -1,0 +1,55 @@
+[project]
+name = "obsidian-multivault-mcp"
+version = "0.1.0"
+description = "MCP server providing multi-vault Obsidian access via the obsidian-local-rest-api plugin."
+authors = [{name = "Sim A", email = "simeon.f.anderson@gmail.com"}]
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.13,<4.0"
+dependencies = [
+    "fastmcp (>=3.0.0,<4.0.0)",
+    "httpx (>=0.28.0,<1.0.0)",
+    "pydantic (>=2.11.0,<3.0.0)",
+    "python-dotenv (>=1.0.0,<2.0.0)",
+    "pyyaml (>=6.0,<7.0)",
+]
+
+[project.scripts]
+obsidian-multivault-mcp = "obsidian_multivault_mcp.__main__:main"
+
+[tool.poetry]
+package-mode = true
+packages = [{include = "obsidian_multivault_mcp", from = "src"}]
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^9.0"
+pytest-asyncio = "^1.0"
+black = "^25.1"
+pylint = "^3.3"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.black]
+line-length = 100
+target-version = ["py313"]
+
+[tool.pylint.format]
+max-line-length = 100
+
+[tool.pylint."messages control"]
+disable = [
+    "missing-module-docstring",
+    "missing-function-docstring",
+    "missing-class-docstring",
+    "too-few-public-methods",
+    "too-many-arguments",
+    "too-many-positional-arguments",
+    "logging-fstring-interpolation",
+    "duplicate-code",
+]
+
+[build-system]
+requires = ["poetry-core>=2.0.0"]
+build-backend = "poetry.core.masonry.api"

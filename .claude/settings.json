@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(poetry install)",
+      "Bash(poetry install:*)",
+      "Bash(poetry lock)",
+      "Bash(poetry run pytest:*)",
+      "Bash(poetry run black:*)",
+      "Bash(poetry run pylint:*)",
+      "Bash(poetry run python:*)"
+    ]
+  }
+}
