@@ -33,8 +33,8 @@ def curate_simple_match(raw: dict) -> dict:
     Defensive about the nested ``matches`` shape: the client validates
     the top-level list-of-dicts, but each result's ``matches`` field is a
     plugin-internal structure that a misbehaving proxy could mangle.
-    Silent-skip bad elements rather than \\:code:`AttributeError`-ing out
-    of the curator — search is a presentation concern, not a contract one,
+    Silent-skip bad elements rather than raising AttributeError out of
+    the curator — search is a presentation concern, not a contract one,
     and an empty ``context`` is a survivable degradation.
     """
     matches_raw = raw.get("matches")
