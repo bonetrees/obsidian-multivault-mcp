@@ -40,12 +40,7 @@ def setup_logging(name: str) -> logging.Logger:
         handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s"))
         pkg_logger = logging.getLogger(PACKAGE_LOGGER_NAME)
         pkg_logger.setLevel(level)
-        # Avoid stacking duplicate handlers if setup_logging is somehow re-run
-        # (e.g. across test sessions in the same interpreter).
-        if not any(getattr(h, "_obsidian_mcp_marker", False) for h in pkg_logger.handlers):
-            # pylint: disable=protected-access
-            handler._obsidian_mcp_marker = True  # type: ignore[attr-defined]
-            pkg_logger.addHandler(handler)
+        pkg_logger.addHandler(handler)
         pkg_logger.propagate = False
         _CONFIGURED = True
     return logging.getLogger(name)

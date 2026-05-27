@@ -56,7 +56,7 @@ class TestVerifySsl:
 
     def test_https_bracketed_ipv6_loopback_disables_verify(self):
         # __main__.py passes raw --host straight through; user might write
-        # "[::1]" since that's the URL form. _is_loopback_host has to
+        # "[::1]" since that's the URL form. is_loopback_host has to
         # normalise brackets so the bind warning behaves the same way
         # config-loaded hosts do.
         assert self._make("https", "[::1]").verify_ssl is False

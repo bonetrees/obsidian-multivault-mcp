@@ -15,7 +15,7 @@ logger = setup_logging("obsidian-multivault-mcp.config")
 DEFAULT_CONFIG_PATH = "./obsidian-multivault-mcp-config.yaml"
 
 
-def _is_loopback_host(host: str) -> bool:
+def is_loopback_host(host: str) -> bool:
     """True if `host` resolves to the loopback range. Used to decide whether
     TLS verification can safely be skipped (loopback can't be MITM'd in
     practice and the plugin ships a self-signed cert).
@@ -116,7 +116,7 @@ class VaultConfig:
         # HTTPS to loopback: the plugin uses a self-signed cert, so verification has to
         # be off. HTTPS to any non-loopback host: leave verification on — the user must
         # have a properly issued cert if they exposed the plugin off-localhost.
-        return not _is_loopback_host(self.host)
+        return not is_loopback_host(self.host)
 
 
 @dataclass(frozen=True)
