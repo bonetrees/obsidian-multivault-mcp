@@ -18,21 +18,22 @@ _INDEX_FILENAME = "Index.md"
 async def _fetch_one_vault(name: str, client) -> dict:
     is_online = await client.get_status()
     if not is_online:
-        return {"name": name, "status": "unreachable", "index": None}
+        return {"name": name, "status": "unreachable", "index": None, "error": None}
     try:
         raw = await client.read_note(_INDEX_FILENAME)
     except NotFound:
         # Index.md missing is the common case and is not an error worth
         # surfacing — the vault is still online.
-        return {"name": name, "status": "online", "index": None}
+        return {"name": name, "status": "online", "index": None, "error": None}
     except ToolError as exc:
-        # Other errors (auth failure, method-not-allowed, transport, …) get
-        # logged and reported as unreachable so the vault isn't quietly marked
-        # online while the LLM can't actually use it.
+        # Health check passed but Index.md fetch failed (auth, 405, mid-request
+        # transport). The vault is reachable but the LLM should expect read
+        # failures — report "degraded" with the error message so it can decide
+        # whether to retry, surface to the user, or try a different vault.
         logger.warning("Vault %r status check passed but Index.md fetch failed: %s", name, exc)
-        return {"name": name, "status": "unreachable", "index": None}
+        return {"name": name, "status": "degraded", "index": None, "error": str(exc)}
     body = strip_frontmatter(raw.get("content", "") or "")
-    return {"name": name, "status": "online", "index": body or None}
+    return {"name": name, "status": "online", "index": body or None, "error": None}
 
 
 @mcp.tool(
@@ -70,13 +71,18 @@ async def list_vaults(ctx: Context) -> dict:
           it}
         - `{path/to/another.md}` — {Description}
 
-    `status: "online"` means the vault both passed the health check and
-    is actually usable for reads (`Index.md` returned 200 or was absent).
-    `status: "unreachable"` covers everything else — Obsidian closed,
-    plugin disabled, wrong port, authentication failure, transport
-    errors — all of which surface here so the LLM doesn't waste a tool
-    call on a vault it can't read from. A vault that's online but has
-    no `Index.md` still shows `status: "online"` with `index: None`.
+    Each entry has `status`, `index`, and `error` fields:
+
+    - `status: "online"` — vault passed the health check and `Index.md`
+      returned successfully (or was absent, in which case `index: None`).
+    - `status: "unreachable"` — health check failed. Obsidian closed,
+      plugin disabled, wrong port, network errors. Don't try other reads.
+    - `status: "degraded"` — health check passed but `Index.md` could
+      not be read (auth failure, method-not-allowed, transport error
+      mid-request). The vault is reachable but reads may fail; `error`
+      holds the underlying message so the LLM can decide what to do.
+
+    `error` is `None` unless `status: "degraded"`.
 
     Filename is strict — only `Index.md` (capital I) is read.
     """

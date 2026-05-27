@@ -125,9 +125,9 @@ def main(argv: list[str] | None = None) -> int:
     # parallel hardcoded list (which previously missed 127.0.0.0/8, IPv6
     # loopback variants, uppercase "Localhost", etc.).
     # pylint: disable-next=import-outside-toplevel
-    from .config import _is_loopback_host
+    from .config import is_loopback_host
 
-    if not _is_loopback_host(host):
+    if not is_loopback_host(host):
         logger.warning(
             "Binding %s on non-loopback host %s. The server has no auth — "
             "only do this on a trusted network.",

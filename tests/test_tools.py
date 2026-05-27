@@ -86,15 +86,20 @@ class TestListVaults:
         assert set(by_name) == {"alpha", "beta", "gamma"}
         assert by_name["alpha"]["status"] == "online"
         assert by_name["alpha"]["index"].startswith("# Alpha")
+        assert by_name["alpha"]["error"] is None
         assert by_name["beta"]["status"] == "online"
         assert by_name["beta"]["index"] is None
+        assert by_name["beta"]["error"] is None
         assert by_name["gamma"]["status"] == "unreachable"
         assert by_name["gamma"]["index"] is None
+        assert by_name["gamma"]["error"] is None
 
 
-class TestListVaultsAuthFailureNotSwallowed:
+class TestListVaultsDegradedOnAuthFailure:
     """A vault that passes health check but returns 401 on Index.md must NOT
-    be reported as online — that would lie to the LLM about usability."""
+    be reported as online — that would lie to the LLM about usability. It
+    also shouldn't be reported as unreachable (the plugin is responding);
+    "degraded" with the underlying error is the honest signal."""
 
     @pytest.fixture
     def vault_handlers(self):
@@ -107,12 +112,14 @@ class TestListVaultsAuthFailureNotSwallowed:
 
         return {"v": vault}
 
-    async def test_marks_unreachable_on_auth_failure(self, mcp_client):
+    async def test_marks_degraded_on_auth_failure(self, mcp_client):
         data = await _call(mcp_client, "list_vaults", {})
         entry = data["vaults"][0]
         assert entry["name"] == "v"
-        assert entry["status"] == "unreachable"
+        assert entry["status"] == "degraded"
         assert entry["index"] is None
+        assert entry["error"] is not None
+        assert "Authentication failed" in entry["error"]
 
 
 # ---------- list_directory ----------

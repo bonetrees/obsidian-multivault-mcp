@@ -113,7 +113,12 @@ class ObsidianVaultClient:
         return urllib.parse.quote(path, safe="/")
 
     @staticmethod
-    def _parse_error_body(response: httpx.Response) -> dict:
+    def _safe_json_object(response: httpx.Response) -> dict:
+        """Parse the response body as a JSON object; return {} on any failure.
+
+        Used on both error paths (extract message/errorCode) and the
+        health-check success path (extract status). Never raises.
+        """
         try:
             body = response.json()
         except (json.JSONDecodeError, ValueError):
@@ -181,7 +186,7 @@ class ObsidianVaultClient:
     ) -> None:
         if response.is_success:
             return
-        body = self._parse_error_body(response)
+        body = self._safe_json_object(response)
         msg = body.get("message") or (response.text.strip() if response.text else "(no body)")
         code = body.get("errorCode")
         location = self._format_location(path)
@@ -268,7 +273,7 @@ class ObsidianVaultClient:
             return False
         if response.status_code != 200:
             return False
-        body = self._parse_error_body(response)
+        body = self._safe_json_object(response)
         return body.get("status") == "OK"
 
     # vnd.olrapi.note+json response shape: each field is optional but if
@@ -447,7 +452,7 @@ class ObsidianVaultClient:
             headers={"Content-Type": "application/vnd.olrapi.dataview.dql+txt"},
         )
         if response.status_code == 400:
-            body = self._parse_error_body(response)
+            body = self._safe_json_object(response)
             if body.get("errorCode") == self.DATAVIEW_NOT_INSTALLED_CODE:
                 logger.info(
                     "Dataview not installed in vault '%s'; falling back to text search.",
