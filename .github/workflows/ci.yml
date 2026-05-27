@@ -9,6 +9,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Opt in to Node.js 24 for JavaScript actions ahead of the June 2026 default
+# switch (actions/checkout@v4, setup-python@v5, cache@v4 still ship Node 20
+# binaries today). Drop this once those actions publish Node 24 builds.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   check:
     runs-on: ubuntu-latest
