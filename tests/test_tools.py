@@ -296,7 +296,7 @@ class TestPatchNoteFrontmatter:
     async def test_guard_b_list_rejection_surfaces_as_tool_error(self, mcp_client):
         # FastMCP turns a server-side ToolError into an is_error result; the
         # in-process Client re-raises it as ToolError. The caller must see
-        # the structured-content guidance so they can switch to a tags tool.
+        # the scalar-only constraint so they can correct the content shape.
         with pytest.raises(ToolError) as exc_info:
             await _call(
                 mcp_client,

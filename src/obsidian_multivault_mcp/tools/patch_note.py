@@ -39,11 +39,12 @@ async def patch_note(
       first if you are unsure of the structure.
     - `target_type="block-reference"` — `target` is the block ID (the
       `^block-id` at the end of a block, without the `^`).
-    - `target_type="frontmatter-key"` — `target` is the YAML key name.
-      **Scalar values only** (e.g. `status`, `date`, `title`). Array or
-      object frontmatter (e.g. `tags`) is not supported by this tool —
-      content that parses as a JSON array/object is rejected with a
-      clear error.
+    - `target_type="frontmatter-key"` — `target` is the YAML key name
+      (e.g. `status`, `date`, `title`). **Scalar-valued keys only** —
+      the `content` you supply must be a scalar (string, number,
+      boolean, date). Array- or object-valued keys (e.g. `tags`) are
+      not supported by this tool; content that parses as a JSON
+      array/object is rejected with a clear error.
 
     **Operations:**
 

@@ -384,8 +384,8 @@ class ObsidianVaultClient:
             # Guard B (parse-to-reject): patch_note frontmatter is scalar-only.
             # If content parses as a JSON array/object the caller almost
             # certainly means structured data, which json.dumps(str) would
-            # silently stringify into one wrong value. Fail loud and point at
-            # the structured tools. NOTE: the parse result is used ONLY as a
+            # silently stringify into one wrong value. Fail loud rather than
+            # silently stringify. NOTE: the parse result is used ONLY as a
             # yes/no classification signal and then discarded — the untouched
             # original string is what gets sent. This is deliberately the
             # opposite data flow from "parse and use the result as the value"
