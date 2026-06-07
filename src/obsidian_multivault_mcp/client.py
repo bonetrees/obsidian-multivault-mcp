@@ -381,6 +381,25 @@ class ObsidianVaultClient:
         # round-trips correctly through json.dumps ("done" → "done"). Array
         # values are a separate, unsolved case (the tool types content as str).
         if wire_target_type == "frontmatter":
+            # Guard B (parse-to-reject): patch_note frontmatter is scalar-only.
+            # If content parses as a JSON array/object the caller almost
+            # certainly means structured data, which json.dumps(str) would
+            # silently stringify into one wrong value. Fail loud and point at
+            # the structured tools. NOTE: the parse result is used ONLY as a
+            # yes/no classification signal and then discarded — the untouched
+            # original string is what gets sent. This is deliberately the
+            # opposite data flow from "parse and use the result as the value"
+            # (which would silently coerce scalars like "1.0" → 1.0).
+            try:
+                parsed = json.loads(content)
+            except (json.JSONDecodeError, ValueError):
+                parsed = None
+            if isinstance(parsed, (list, dict)):
+                raise ToolError(
+                    f"patch_note frontmatter targets are scalar-only, but content "
+                    f"for '{target}' looks like a JSON {type(parsed).__name__}. Use "
+                    f"a dedicated frontmatter/tags tool for array or object values."
+                )
             headers["Content-Type"] = "application/json"
             body = json.dumps(content).encode("utf-8")
         else:
