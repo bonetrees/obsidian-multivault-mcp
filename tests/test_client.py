@@ -308,6 +308,159 @@ class TestPatchNote:
         assert "HTTP 400" in msg
         assert "errorCode 40080" in msg
 
+    @pytest.mark.parametrize(
+        ("tool_enum", "wire_value"),
+        [
+            ("heading", "heading"),
+            ("block-reference", "block"),
+            ("frontmatter-key", "frontmatter"),
+        ],
+    )
+    async def test_target_type_enum_translation(self, tool_enum, wire_value):
+        # The tool exposes a friendly enum (heading | block-reference |
+        # frontmatter-key); the plugin's Target-Type header accepts only
+        # heading | block | frontmatter. Passing the tool enum through
+        # untranslated 400s with errorCode 40054 — that was the original
+        # bug. Each tool enum must map to the right wire value.
+        seen = {}
+
+        def handler(request):
+            seen["target-type"] = request.headers.get("target-type")
+            return httpx.Response(200)
+
+        # Use a JSON-scalar-looking string so frontmatter passes Guard B.
+        async with make_client(handler) as client:
+            await client.patch_note(
+                "doc.md",
+                operation="append",
+                target_type=tool_enum,
+                target="some-target",
+                content="draft",
+            )
+        assert seen["target-type"] == wire_value
+
+    async def test_frontmatter_sends_json_content_type(self):
+        # The plugin interprets PATCH bodies for frontmatter targets as JSON.
+        # text/markdown (the default for heading/block) would mishandle the
+        # value even with a correct Target-Type.
+        seen = {}
+
+        def handler(request):
+            seen["content-type"] = request.headers.get("content-type")
+            seen["body"] = request.content
+            return httpx.Response(200)
+
+        async with make_client(handler) as client:
+            await client.patch_note(
+                "doc.md",
+                operation="replace",
+                target_type="frontmatter-key",
+                target="status",
+                content="published",
+            )
+        assert seen["content-type"] == "application/json"
+        # Body is JSON-encoded — json.dumps("published") wraps the string
+        # in quotes so the plugin sees a JSON string, not a bare token.
+        assert seen["body"] == b'"published"'
+
+    async def test_non_frontmatter_keeps_text_markdown(self):
+        # Sanity check that the JSON branch is gated on frontmatter and
+        # doesn't leak into heading/block. text/markdown + raw body.
+        seen = {}
+
+        def handler(request):
+            seen["content-type"] = request.headers.get("content-type")
+            seen["body"] = request.content
+            return httpx.Response(200)
+
+        async with make_client(handler) as client:
+            await client.patch_note(
+                "doc.md",
+                operation="append",
+                target_type="block-reference",
+                target="findings-summary",
+                content="\nnew bullet",
+            )
+        assert seen["content-type"] == "text/markdown"
+        assert seen["body"] == b"\nnew bullet"
+
+    @pytest.mark.parametrize(
+        ("content", "kind_label"),
+        [
+            ('["a","b","c"]', "list"),
+            ('{"k":"v"}', "dict"),
+        ],
+    )
+    async def test_frontmatter_guard_b_rejects_structured(self, content, kind_label):
+        # Guard B fires at the client boundary BEFORE any HTTP call when
+        # frontmatter content parses as JSON list/dict — silently
+        # stringifying structured data into a single frontmatter value is
+        # the exact footgun the guard exists to prevent.
+        calls = []
+
+        def handler(request):
+            calls.append(request)
+            return httpx.Response(200)
+
+        async with make_client(handler) as client:
+            with pytest.raises(ToolError) as exc_info:
+                await client.patch_note(
+                    "doc.md",
+                    operation="replace",
+                    target_type="frontmatter-key",
+                    target="tags",
+                    content=content,
+                )
+        msg = str(exc_info.value)
+        assert "scalar-only" in msg
+        assert kind_label in msg  # mentions "list" or "dict" in the error
+        assert "tags" in msg  # echoes the target so the caller can locate it
+        assert not calls, "Guard B must reject before any HTTP request"
+
+    @pytest.mark.parametrize("content", ["1.0", "true", "null", "42"])
+    async def test_frontmatter_guard_b_passes_json_scalar_looking_strings(self, content):
+        # The whole point of parse-to-reject (as opposed to parse-to-coerce):
+        # strings that *look* like JSON scalars must be sent as JSON STRINGS
+        # ("1.0" → b'"1.0"'), NOT coerced to their parsed value (1.0 float,
+        # True bool, None, etc.). A caller wanting version: "1.0" should get
+        # the literal string back, not silently lose precision/type.
+        seen = {}
+
+        def handler(request):
+            seen["body"] = request.content
+            return httpx.Response(200)
+
+        async with make_client(handler) as client:
+            await client.patch_note(
+                "doc.md",
+                operation="replace",
+                target_type="frontmatter-key",
+                target="version",
+                content=content,
+            )
+        # json.dumps("1.0") → '"1.0"' (a JSON-encoded string), not '1.0'.
+        assert seen["body"] == json.dumps(content).encode("utf-8")
+
+    async def test_frontmatter_guard_b_passes_plain_scalar(self):
+        # Bare scalar like "draft" doesn't parse as JSON (invalid token).
+        # The parse exception path leaves parsed=None and the guard lets
+        # it through unchanged.
+        seen = {}
+
+        def handler(request):
+            seen["body"] = request.content
+            return httpx.Response(200)
+
+        async with make_client(handler) as client:
+            await client.patch_note(
+                "doc.md",
+                operation="replace",
+                target_type="frontmatter-key",
+                target="status",
+                content="draft",
+            )
+        assert seen["body"] == b'"draft"'
+
 
 class TestDeleteNote:
     async def test_success(self):
