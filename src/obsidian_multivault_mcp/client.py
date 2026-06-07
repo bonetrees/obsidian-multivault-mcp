@@ -395,10 +395,17 @@ class ObsidianVaultClient:
             except (json.JSONDecodeError, ValueError):
                 parsed = None
             if isinstance(parsed, (list, dict)):
+                # Match _raise_for_status' message shape (vault + operation +
+                # location) so a Guard B failure is diagnosable from a log
+                # line alone — there's no HTTP response to lean on. Don't
+                # name a successor tool: pointing callers at something that
+                # doesn't exist yet is worse than naming nothing.
+                location = self._format_location(path)
                 raise ToolError(
-                    f"patch_note frontmatter targets are scalar-only, but content "
-                    f"for '{target}' looks like a JSON {type(parsed).__name__}. Use "
-                    f"a dedicated frontmatter/tags tool for array or object values."
+                    f"patch_note frontmatter targets are scalar-only for vault "
+                    f"'{self.name}'{location}, but content for '{target}' looks like "
+                    f"a JSON {type(parsed).__name__}. Array or object frontmatter "
+                    f"is not supported by this tool."
                 )
             headers["Content-Type"] = "application/json"
             body = json.dumps(content).encode("utf-8")

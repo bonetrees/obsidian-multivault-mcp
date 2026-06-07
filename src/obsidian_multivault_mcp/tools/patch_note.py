@@ -41,9 +41,9 @@ async def patch_note(
       `^block-id` at the end of a block, without the `^`).
     - `target_type="frontmatter-key"` — `target` is the YAML key name.
       **Scalar values only** (e.g. `status`, `date`, `title`). Array or
-      object frontmatter (e.g. `tags`) is not supported here — content
-      that parses as a JSON array/object is rejected with a clear error.
-      Use a dedicated frontmatter/tags tool for structured values.
+      object frontmatter (e.g. `tags`) is not supported by this tool —
+      content that parses as a JSON array/object is rejected with a
+      clear error.
 
     **Operations:**
 
