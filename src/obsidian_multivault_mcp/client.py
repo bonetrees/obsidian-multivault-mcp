@@ -378,8 +378,10 @@ class ObsidianVaultClient:
         }
         # Frontmatter PATCH bodies are interpreted as JSON by the plugin, which
         # enables intelligent merging of structured values. A scalar string
-        # round-trips correctly through json.dumps ("done" → "done"). Array
-        # values are a separate, unsolved case (the tool types content as str).
+        # round-trips correctly through json.dumps — e.g. json.dumps("done")
+        # yields the 6-byte JSON-string b'"done"' (quotes included), which the
+        # plugin then writes as the YAML string "done". Array values are a
+        # separate, unsolved case (the tool types content as str).
         if wire_target_type == "frontmatter":
             # Guard B (parse-to-reject): patch_note frontmatter is scalar-only.
             # If content parses as a JSON array/object the caller almost

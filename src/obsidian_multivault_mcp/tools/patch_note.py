@@ -41,10 +41,12 @@ async def patch_note(
       `^block-id` at the end of a block, without the `^`).
     - `target_type="frontmatter-key"` — `target` is the YAML key name
       (e.g. `status`, `date`, `title`). **Scalar-valued keys only** —
-      the `content` you supply must be a scalar (string, number,
-      boolean, date). Array- or object-valued keys (e.g. `tags`) are
-      not supported by this tool; content that parses as a JSON
-      array/object is rejected with a clear error.
+      `content` is typed as `str` and the value is written verbatim as
+      a YAML string (so `content="1.0"` writes the string `"1.0"`, not
+      the number `1.0`; the same applies to date- and boolean-looking
+      input). Array- or object-valued keys (e.g. `tags`) are not
+      supported by this tool; content that parses as a JSON array/
+      object is rejected with a clear error.
 
     **Operations:**
 
