@@ -40,7 +40,13 @@ async def patch_note(
     - `target_type="block-reference"` — `target` is the block ID (the
       `^block-id` at the end of a block, without the `^`).
     - `target_type="frontmatter-key"` — `target` is the YAML key name
-      (e.g. `"tags"`, `"date"`).
+      (e.g. `status`, `date`, `title`). **Scalar-valued keys only** —
+      `content` is typed as `str` and the value is written verbatim as
+      a YAML string (so `content="1.0"` writes the string `"1.0"`, not
+      the number `1.0`; the same applies to date- and boolean-looking
+      input). Array- or object-valued keys (e.g. `tags`) are not
+      supported by this tool; content that parses as a JSON array/
+      object is rejected with a clear error.
 
     **Operations:**
 
@@ -49,6 +55,11 @@ async def patch_note(
       automatically.
     - `prepend` — add content before the targeted section.
     - `replace` — overwrite the targeted section's content entirely.
+      **Caution for headings:** replacing a parent heading overwrites the
+      entire section *including all child subheadings and their bodies*
+      (everything down to the next same-or-higher-level heading). To edit
+      only a parent's intro text without touching children, target the
+      deepest specific heading instead.
     """
     client = get_client(ctx, vault)
     await client.patch_note(

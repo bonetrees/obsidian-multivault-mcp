@@ -255,6 +255,84 @@ class TestPatchNote:
         assert data["target"] == "Report::Findings"
 
 
+class TestPatchNoteFrontmatter:
+    """End-to-end coverage of the v0.2.0 frontmatter fix: the friendly
+    `frontmatter-key` enum must reach the plugin as `frontmatter` over JSON,
+    and Guard B (structured-content rejection) must surface as a tool error
+    through the FastMCP client — not a silent stringification."""
+
+    @pytest.fixture
+    def vault_handlers(self):
+        def vault(request):
+            if request.method == "PATCH" and request.url.path == "/vault/doc.md":
+                # Mirror the live plugin: PATCH on frontmatter returns 200.
+                # Asserting on header/body shape happens at the client layer
+                # (test_client.py) — here we just confirm the in-process
+                # FastMCP path delivers the call and curates the response.
+                assert request.headers["target-type"] == "frontmatter"
+                assert request.headers["content-type"] == "application/json"
+                return httpx.Response(200)
+            return httpx.Response(404)
+
+        return {"v": vault}
+
+    async def test_scalar_frontmatter_patch_succeeds(self, mcp_client):
+        data = await _call(
+            mcp_client,
+            "patch_note",
+            {
+                "vault": "v",
+                "path": "doc.md",
+                "operation": "replace",
+                "target_type": "frontmatter-key",
+                "target": "status",
+                "content": "published",
+            },
+        )
+        assert data["status"] == "patched"
+        assert data["target_type"] == "frontmatter-key"  # tool keeps friendly enum
+        assert data["target"] == "status"
+
+    async def test_guard_b_list_rejection_surfaces_as_tool_error(self, mcp_client):
+        # FastMCP turns a server-side ToolError into an is_error result; the
+        # in-process Client re-raises it as ToolError. The caller must see
+        # the scalar-only constraint so they can correct the content shape.
+        with pytest.raises(ToolError) as exc_info:
+            await _call(
+                mcp_client,
+                "patch_note",
+                {
+                    "vault": "v",
+                    "path": "doc.md",
+                    "operation": "replace",
+                    "target_type": "frontmatter-key",
+                    "target": "tags",
+                    "content": '["a","b"]',
+                },
+            )
+        msg = str(exc_info.value)
+        assert "scalar-only" in msg
+        assert "list" in msg
+
+    async def test_guard_b_dict_rejection_surfaces_as_tool_error(self, mcp_client):
+        with pytest.raises(ToolError) as exc_info:
+            await _call(
+                mcp_client,
+                "patch_note",
+                {
+                    "vault": "v",
+                    "path": "doc.md",
+                    "operation": "replace",
+                    "target_type": "frontmatter-key",
+                    "target": "meta",
+                    "content": '{"k":"v"}',
+                },
+            )
+        msg = str(exc_info.value)
+        assert "scalar-only" in msg
+        assert "dict" in msg
+
+
 class TestDeleteNote:
     @pytest.fixture
     def vault_handlers(self):

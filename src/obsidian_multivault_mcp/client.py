@@ -353,6 +353,15 @@ class ObsidianVaultClient:
         )
         self._raise_for_status(response, "append_note", path)
 
+    # Tool-facing enum (PatchTargetType) → obsidian-local-rest-api Target-Type
+    # vocabulary. The plugin accepts only "heading", "block", "frontmatter";
+    # sending the tool's friendlier names verbatim 400s with errorCode 40054.
+    _TARGET_TYPE_WIRE = {
+        "heading": "heading",
+        "block-reference": "block",
+        "frontmatter-key": "frontmatter",
+    }
+
     async def patch_note(
         self,
         path: str,
@@ -361,17 +370,55 @@ class ObsidianVaultClient:
         target: str,
         content: str,
     ) -> None:
+        wire_target_type = self._TARGET_TYPE_WIRE.get(target_type, target_type)
         headers = {
             "Operation": operation,
-            "Target-Type": target_type,
+            "Target-Type": wire_target_type,
             "Target": urllib.parse.quote(target, safe=""),
-            "Content-Type": "text/markdown",
         }
+        # Frontmatter PATCH bodies are interpreted as JSON by the plugin, which
+        # enables intelligent merging of structured values. A scalar string
+        # round-trips correctly through json.dumps — e.g. json.dumps("done")
+        # yields the 6-byte JSON-string b'"done"' (quotes included), which the
+        # plugin then writes as the YAML string "done". Array values are a
+        # separate, unsolved case (the tool types content as str).
+        if wire_target_type == "frontmatter":
+            # Guard B (parse-to-reject): patch_note frontmatter is scalar-only.
+            # If content parses as a JSON array/object the caller almost
+            # certainly means structured data, which json.dumps(str) would
+            # silently stringify into one wrong value. Fail loud rather than
+            # silently stringify. NOTE: the parse result is used ONLY as a
+            # yes/no classification signal and then discarded — the untouched
+            # original string is what gets sent. This is deliberately the
+            # opposite data flow from "parse and use the result as the value"
+            # (which would silently coerce scalars like "1.0" → 1.0).
+            try:
+                parsed = json.loads(content)
+            except (json.JSONDecodeError, ValueError):
+                parsed = None
+            if isinstance(parsed, (list, dict)):
+                # Match _raise_for_status' message shape (vault + operation +
+                # location) so a Guard B failure is diagnosable from a log
+                # line alone — there's no HTTP response to lean on. Don't
+                # name a successor tool: pointing callers at something that
+                # doesn't exist yet is worse than naming nothing.
+                location = self._format_location(path)
+                raise ToolError(
+                    f"patch_note frontmatter targets are scalar-only for vault "
+                    f"'{self.name}'{location}, but content for '{target}' looks like "
+                    f"a JSON {type(parsed).__name__}. Array or object frontmatter "
+                    f"is not supported by this tool."
+                )
+            headers["Content-Type"] = "application/json"
+            body = json.dumps(content).encode("utf-8")
+        else:
+            headers["Content-Type"] = "text/markdown"
+            body = content.encode("utf-8")
         response = await self._request(
             "PATCH",
             f"/vault/{self._encode_path(path)}",
             operation="patch_note",
-            content=content.encode("utf-8"),
+            content=body,
             headers=headers,
         )
         self._raise_for_status(response, "patch_note", path)
