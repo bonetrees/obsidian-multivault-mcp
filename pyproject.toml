@@ -2,7 +2,7 @@
 name = "obsidian-multivault-mcp"
 version = "0.1.0"
 description = "MCP server providing multi-vault Obsidian access via the obsidian-local-rest-api plugin."
-authors = [{name = "Sim A", email = "simeon.f.anderson@gmail.com"}]
+authors = [{name = "bonetrees", email = "sa@bonetrees.dev"}]
 readme = "README.md"
 license = {file = "LICENSE"}
 requires-python = ">=3.13,<4.0"
