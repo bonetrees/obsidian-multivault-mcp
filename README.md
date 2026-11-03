@@ -10,9 +10,17 @@ tools for vault discovery, CRUD, search, and surgical patching.
 - Python 3.13+
 - Poetry 2.0+
 - Obsidian with the **Local REST API** plugin installed and enabled in
-  every vault you want to expose. **Minimum tested plugin version:
-  3.4.3** — older versions are missing the PATCH v3 endpoint and the
-  `/search/simple/` endpoint this server depends on.
+  every vault you want to expose. **Minimum required plugin version:
+  5.0** (developed and tested against **5.5.2**).
+
+  `patch_note` speaks the plugin's **markdown-patch v2** format: it sends
+  a `Markdown-Patch-Version: 2` header and encodes heading targets as
+  JSON arrays. Plugin 5.x *requires* that header and rejects a patch
+  without it, while plugin 4.x and earlier predate the format entirely
+  and would read the JSON array as a literal heading name. So patching
+  works against 5.x only — there is no version negotiation. Every other
+  tool (read, write, append, delete, list, search) still works against
+  3.4.3+, which is where `/search/simple/` was introduced.
 
 ## Plugin Setup
 
@@ -172,7 +180,7 @@ Restart Claude Desktop after editing the config.
 | `read_note` | Read a note's content (frontmatter stripped), parsed frontmatter, tags, and stat. |
 | `write_note` | Create or overwrite a note. |
 | `append_note` | Append content to the end of an existing note. (LLM must include leading `\n`.) |
-| `patch_note` | Surgically edit by heading / block reference / frontmatter key. Heading targets use `::` from the document root. |
+| `patch_note` | Surgically edit by heading / block reference / frontmatter key. Heading targets use `::` from the document root. Returns any advisory `warnings` from the patch engine. |
 | `delete_note` | Delete a note. Requires `confirm=True` as a safety gate. |
 | `search_vault` | Text, JsonLogic, or Dataview DQL search in one vault. Dataview falls back to text search with a warning if the plugin is missing. |
 | `search_all_vaults` | Fan-out search across every configured vault in parallel. |
