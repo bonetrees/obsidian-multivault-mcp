@@ -7,7 +7,7 @@ from ..validation_types import VaultFilePath, VaultName
 from ._helpers import epoch_ms_to_iso, strip_frontmatter
 
 
-def curate_note(vault: str, path: str, raw: dict) -> dict:
+def curate_note(vault: str, path: str, raw: dict, etag: str | None = None) -> dict:
     raw_content = raw.get("content", "") or ""
     raw_frontmatter = raw.get("frontmatter")
     stat = raw.get("stat") or {}
@@ -22,6 +22,7 @@ def curate_note(vault: str, path: str, raw: dict) -> dict:
             "modified": epoch_ms_to_iso(stat.get("mtime")),
             "size": stat.get("size"),
         },
+        "etag": etag,
     }
 
 
@@ -37,10 +38,16 @@ async def read_note(ctx: Context, vault: VaultName, path: VaultFilePath) -> dict
     both frontmatter tags and inline `#tag` references. `stat.created` and
     `stat.modified` are ISO 8601 UTC timestamps.
 
+    `etag` identifies this exact version of the note. If you plan to
+    write the note back after reading it, pass `etag` as `if_match` to
+    `write_note`, `patch_note`, `append_note` or `delete_note`: the write
+    is then refused if anyone (often the user, typing in Obsidian) changed
+    the note in the meantime, instead of silently overwriting their edit.
+
     For large notes consider whether you really need the full body — for
     targeted reads, use `search_vault` first to find a specific section,
     or `patch_note` to edit without reading.
     """
     client = get_client(ctx, vault)
-    raw = await client.read_note(path)
-    return curate_note(vault, path, raw)
+    raw, etag = await client.read_note(path)
+    return curate_note(vault, path, raw, etag)

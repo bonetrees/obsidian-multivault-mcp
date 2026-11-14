@@ -62,6 +62,22 @@ def validate_vault_file_path(value: object) -> str:
     return cleaned
 
 
+def validate_etag(value: object) -> str:
+    """Entity tag passed back to the plugin as If-Match.
+
+    Format checks (quoting, list syntax) are left to the plugin, which
+    reports them as errorCode 40024. Only reject what can't be a header
+    value at all: empty input and line breaks, which httpx would otherwise
+    refuse with an error that isn't a ToolError.
+    """
+    tag = _require_str("etag", value)
+    if not tag.strip():
+        raise ValueError("etag must be non-empty")
+    if "\r" in tag or "\n" in tag:
+        raise ValueError("etag must not contain line breaks")
+    return tag
+
+
 def _reject_non_int_context_length(value: object) -> int:
     """Pydantic BeforeValidator: reject non-int (incl. bool) before coercion.
 
@@ -86,6 +102,7 @@ def clamp_context_length(value: int) -> int:
 VaultName = Annotated[str, BeforeValidator(validate_vault_name)]
 VaultPath = Annotated[str, BeforeValidator(validate_vault_path)]
 VaultFilePath = Annotated[str, BeforeValidator(validate_vault_file_path)]
+ETag = Annotated[str, BeforeValidator(validate_etag)]
 PatchOperation = Literal["append", "prepend", "replace"]
 PatchTargetType = Literal["heading", "block-reference", "frontmatter-key"]
 SearchType = Literal["text", "jsonlogic", "dataview"]

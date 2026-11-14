@@ -5,7 +5,7 @@ from fastmcp.exceptions import ToolError
 from pydantic import StrictBool
 
 from ..server import get_client, mcp
-from ..validation_types import VaultFilePath, VaultName
+from ..validation_types import ETag, VaultFilePath, VaultName
 
 
 @mcp.tool(
@@ -17,7 +17,11 @@ from ..validation_types import VaultFilePath, VaultName
     tags={"obsidian", "write"},
 )
 async def delete_note(
-    ctx: Context, vault: VaultName, path: VaultFilePath, confirm: StrictBool = False
+    ctx: Context,
+    vault: VaultName,
+    path: VaultFilePath,
+    confirm: StrictBool = False,
+    if_match: ETag | None = None,
 ) -> dict:
     """Delete a note from a vault. Destructive — confirm with the user first.
 
@@ -27,6 +31,10 @@ async def delete_note(
     Only deletes individual notes (files), not folders. Consider whether
     the vault's `Index.md` needs updating after deletion if other tool
     calls rely on its contents.
+
+    Pass `if_match` (the `etag` from `read_note`) to delete only if the
+    note is still the version you read; if it has changed since, nothing
+    is deleted and the call fails with "Precondition failed".
     """
     if confirm is not True:
         raise ToolError(
@@ -34,5 +42,5 @@ async def delete_note(
             "confirm with the user before retrying."
         )
     client = get_client(ctx, vault)
-    await client.delete_note(path)
+    await client.delete_note(path, if_match=if_match)
     return {"vault": vault, "path": path, "status": "deleted"}

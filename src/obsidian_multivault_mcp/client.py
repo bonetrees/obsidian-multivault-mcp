@@ -27,6 +27,15 @@ class NotFound(ToolError):
     """
 
 
+class PreconditionFailed(ToolError):
+    """Raised when a conditional write is refused with HTTP 412.
+
+    The plugin guarantees nothing was written. Kept distinct from ToolError
+    so the tool layer can reword it for create-only writes, where "the
+    precondition failed" really means "the note already exists".
+    """
+
+
 class ObsidianVaultClient:
     HEALTH_CHECK_TIMEOUT = 3.0
     DEFAULT_TIMEOUT = 30.0
@@ -58,6 +67,11 @@ class ObsidianVaultClient:
     # Tool-facing heading paths are delimiter-joined ("A::B"); v2 addresses
     # headings structurally, as a JSON array of segments.
     HEADING_PATH_DELIMITER = "::"
+
+    # Malformed If-Match / If-None-Match (e.g. empty, or two tags without a
+    # comma). An unquoted tag is NOT this — the plugin treats it as a tag
+    # that never matches, so it comes back as a 412 instead.
+    INVALID_PRECONDITION_CODE = 40024
 
     @classmethod
     def _resolve_timeout_env(cls) -> float:
@@ -189,6 +203,34 @@ class ObsidianVaultClient:
         return body
 
     @staticmethod
+    def _precondition_headers(
+        if_match: str | None = None, if_none_match: str | None = None
+    ) -> dict[str, str]:
+        headers = {}
+        if if_match is not None:
+            headers["If-Match"] = if_match
+        if if_none_match is not None:
+            headers["If-None-Match"] = if_none_match
+        return headers
+
+    @staticmethod
+    def _etag(response: httpx.Response) -> str | None:
+        """Return the file's entity tag from a successful vault response.
+
+        The plugin sets a strong, content-derived ETag on GET text/markdown
+        (and HEAD), PUT, POST and PATCH. Express also stamps its own *weak*
+        tag on any JSON body it serialises — the note+json GET and every
+        error response — but that tag hashes the response, not the file, and
+        the plugin compares If-Match strongly, so it could never match.
+        Dropping weak tags means a caller gets None rather than a tag that
+        guarantees a 412.
+        """
+        tag = response.headers.get("ETag")
+        if not tag or tag.startswith("W/"):
+            return None
+        return tag
+
+    @staticmethod
     def _format_location(path: str | None) -> str:
         """Render the ' at <path>' segment used in error messages.
 
@@ -236,6 +278,11 @@ class ObsidianVaultClient:
                 f"Not found{location} in vault '{self.name}' during {operation}: "
                 f"{msg}{hint_part}"
             )
+        if response.status_code == 412:
+            raise PreconditionFailed(
+                f"Precondition failed{location} in vault '{self.name}' during "
+                f"{operation} (HTTP 412); nothing was written: {msg}{hint_part}"
+            )
         if response.status_code == 405:
             raise ToolError(
                 f"Operation not supported{location} in vault '{self.name}' "
@@ -252,6 +299,13 @@ class ObsidianVaultClient:
                 f"This client sends '{self.MARKDOWN_PATCH_VERSION_HEADER}: "
                 f"{self.MARKDOWN_PATCH_VERSION}'; the installed obsidian-local-rest-api "
                 "expects a different patch format. Check the plugin version."
+            )
+        if code == self.INVALID_PRECONDITION_CODE:
+            raise ToolError(
+                f"Malformed etag{location} in vault '{self.name}' during "
+                f"{operation} (HTTP {response.status_code}, errorCode {code}): {msg}. "
+                "Pass the etag exactly as read_note or a previous write returned it, "
+                "quotes included."
             )
         if code == self.INVALID_PATCH_TARGET_CODE:
             raise ToolError(
@@ -336,10 +390,26 @@ class ObsidianVaultClient:
         ("stat", dict, "object"),
     )
 
-    async def read_note(self, path: str) -> dict:
+    async def read_note(self, path: str) -> tuple[dict, str | None]:
+        """Returns (note+json body, file etag).
+
+        The note+json GET carries no usable file ETag (see ``_etag``), so the
+        tag comes from a body-less HEAD issued *first*. The order is the
+        safety property: if the note changes between the two requests, the
+        tag is older than the content returned, so a write conditioned on it
+        fails with 412 instead of silently overwriting a change the caller
+        never saw. Reversing the order would hand back a tag newer than the
+        content — exactly the lost update this exists to prevent.
+        """
+        url = f"/vault/{self._encode_path(path)}"
+        head = await self._request(
+            "HEAD", url, operation="read_note", headers={"Accept": "text/markdown"}
+        )
+        self._raise_for_status(head, "read_note", path)
+        etag = self._etag(head)
         response = await self._request(
             "GET",
-            f"/vault/{self._encode_path(path)}",
+            url,
             operation="read_note",
             headers={"Accept": "application/vnd.olrapi.note+json"},
         )
@@ -381,27 +451,40 @@ class ObsidianVaultClient:
                         f"'{self.name}' during read_note{location}, "
                         f"got {type(value).__name__}."
                     )
-        return body
+        return body, etag
 
-    async def write_note(self, path: str, content: str) -> None:
+    async def write_note(
+        self,
+        path: str,
+        content: str,
+        if_match: str | None = None,
+        if_none_match: str | None = None,
+    ) -> str | None:
+        """PUT the whole note; returns its new etag."""
         response = await self._request(
             "PUT",
             f"/vault/{self._encode_path(path)}",
             operation="write_note",
             content=content.encode("utf-8"),
-            headers={"Content-Type": "text/markdown"},
+            headers={
+                "Content-Type": "text/markdown",
+                **self._precondition_headers(if_match, if_none_match),
+            },
         )
         self._raise_for_status(response, "write_note", path)
+        return self._etag(response)
 
-    async def append_note(self, path: str, content: str) -> None:
+    async def append_note(self, path: str, content: str, if_match: str | None = None) -> str | None:
+        """POST content onto the end of the note; returns its new etag."""
         response = await self._request(
             "POST",
             f"/vault/{self._encode_path(path)}",
             operation="append_note",
             content=content.encode("utf-8"),
-            headers={"Content-Type": "text/markdown"},
+            headers={"Content-Type": "text/markdown", **self._precondition_headers(if_match)},
         )
         self._raise_for_status(response, "append_note", path)
+        return self._etag(response)
 
     # Tool-facing enum (PatchTargetType) → obsidian-local-rest-api Target-Type
     # vocabulary. The plugin accepts only "heading", "block", "frontmatter";
@@ -484,8 +567,9 @@ class ObsidianVaultClient:
         target_type: str,
         target: str,
         content: str,
-    ) -> list[dict]:
-        """Apply one surgical edit; returns the patch's advisory warnings."""
+        if_match: str | None = None,
+    ) -> tuple[list[dict], str | None]:
+        """Apply one surgical edit; returns (advisory warnings, new etag)."""
         wire_target_type = self._TARGET_TYPE_WIRE.get(target_type, target_type)
         headers = {
             "Operation": operation,
@@ -497,6 +581,7 @@ class ObsidianVaultClient:
             # reads either one as a v1 request and 40084s. This client has
             # never sent them; don't start.
             self.MARKDOWN_PATCH_VERSION_HEADER: self.MARKDOWN_PATCH_VERSION,
+            **self._precondition_headers(if_match),
         }
         # Frontmatter PATCH bodies are interpreted as JSON by the plugin, which
         # enables intelligent merging of structured values. A scalar string
@@ -553,13 +638,14 @@ class ObsidianVaultClient:
             path,
             hint=self.HEADING_TARGET_HINT if wire_target_type == "heading" else None,
         )
-        return self._parse_patch_warnings(response)
+        return self._parse_patch_warnings(response), self._etag(response)
 
-    async def delete_note(self, path: str) -> None:
+    async def delete_note(self, path: str, if_match: str | None = None) -> None:
         response = await self._request(
             "DELETE",
             f"/vault/{self._encode_path(path)}",
             operation="delete_note",
+            headers=self._precondition_headers(if_match),
         )
         self._raise_for_status(response, "delete_note", path)
 

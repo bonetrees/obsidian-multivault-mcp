@@ -20,7 +20,7 @@ async def _fetch_one_vault(name: str, client) -> dict:
     if not is_online:
         return {"name": name, "status": "unreachable", "index": None, "error": None}
     try:
-        raw = await client.read_note(_INDEX_FILENAME)
+        raw, _etag = await client.read_note(_INDEX_FILENAME)
     except NotFound:
         # Index.md missing is the common case and is not an error worth
         # surfacing — the vault is still online.

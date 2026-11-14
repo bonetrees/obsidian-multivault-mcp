@@ -13,6 +13,7 @@ import pytest
 from fastmcp.exceptions import ToolError
 
 from obsidian_multivault_mcp.client import ObsidianVaultClient
+from tests.plugin_fakes import FakeVaultNote
 
 
 # ---------- helpers ----------
@@ -207,7 +208,7 @@ class TestWriteNote:
         data = await _call(
             mcp_client, "write_note", {"vault": "v", "path": "new.md", "content": "Hello"}
         )
-        assert data == {"vault": "v", "path": "new.md", "status": "written"}
+        assert data == {"vault": "v", "path": "new.md", "status": "written", "etag": None}
 
 
 class TestAppendNote:
@@ -225,7 +226,7 @@ class TestAppendNote:
         data = await _call(
             mcp_client, "append_note", {"vault": "v", "path": "log.md", "content": "\nentry"}
         )
-        assert data == {"vault": "v", "path": "log.md", "status": "appended"}
+        assert data == {"vault": "v", "path": "log.md", "status": "appended", "etag": None}
 
 
 class TestPatchNote:
@@ -275,7 +276,7 @@ class TestPatchNote:
         advisories = [{"code": "heading-depth-overflow", "message": "level 7"}]
 
         async def fake_patch(*_args, **_kwargs):
-            return advisories
+            return advisories, '"t1"'
 
         monkeypatch.setattr(ObsidianVaultClient, "patch_note", fake_patch)
         data = await _call(
@@ -292,6 +293,100 @@ class TestPatchNote:
         )
         assert data["status"] == "patched"
         assert data["warnings"] == advisories
+        assert data["etag"] == '"t1"'
+
+
+class TestPreconditions:
+    """read_note's etag round-trips through every write tool as if_match."""
+
+    @pytest.fixture
+    def note(self):
+        return FakeVaultNote("doc.md", "# Doc\n\nbody\n")
+
+    @pytest.fixture
+    def vault_handlers(self, note):
+        return {"v": note.handler}
+
+    async def _read_etag(self, mcp_client):
+        data = await _call(mcp_client, "read_note", {"vault": "v", "path": "doc.md"})
+        return data["etag"]
+
+    @staticmethod
+    def _args(tool, etag):
+        args = {"vault": "v", "path": "doc.md", "if_match": etag}
+        if tool == "write_note":
+            args["content"] = "rewritten"
+        elif tool == "append_note":
+            args["content"] = "\nappended"
+        elif tool == "patch_note":
+            args.update(
+                operation="append", target_type="heading", target="Doc", content="\npatched"
+            )
+        else:
+            args["confirm"] = True
+        return args
+
+    async def test_read_note_exposes_file_etag(self, mcp_client, note):
+        assert await self._read_etag(mcp_client) == note.etag
+
+    @pytest.mark.parametrize("tool", ["write_note", "append_note", "patch_note"])
+    async def test_round_trip_succeeds_and_returns_new_etag(self, mcp_client, note, tool):
+        etag = await self._read_etag(mcp_client)
+        data = await _call(mcp_client, tool, self._args(tool, etag))
+        assert data["etag"] == note.etag != etag
+
+    @pytest.mark.parametrize("tool", ["write_note", "append_note", "patch_note", "delete_note"])
+    async def test_interleaved_edit_is_refused_and_preserved(self, mcp_client, note, tool):
+        etag = await self._read_etag(mcp_client)
+        note.content = "# Doc\n\nuser typed this\n"
+        with pytest.raises(ToolError) as exc_info:
+            await _call(mcp_client, tool, self._args(tool, etag))
+        assert "Precondition failed" in str(exc_info.value)
+        assert note.content == "# Doc\n\nuser typed this\n"
+
+    async def test_create_only_on_existing_note_says_it_exists(self, mcp_client, note):
+        with pytest.raises(ToolError) as exc_info:
+            await _call(
+                mcp_client,
+                "write_note",
+                {"vault": "v", "path": "doc.md", "content": "x", "create_only": True},
+            )
+        assert "already exists" in str(exc_info.value)
+        assert note.content == "# Doc\n\nbody\n"
+
+    async def test_create_only_on_absent_note_reports_created(self, mcp_client, note):
+        note.content = None
+        data = await _call(
+            mcp_client,
+            "write_note",
+            {"vault": "v", "path": "doc.md", "content": "fresh", "create_only": True},
+        )
+        assert data["status"] == "created"
+        assert data["etag"] == note.etag
+        assert note.content == "fresh"
+
+    async def test_create_only_and_if_match_are_exclusive(self, mcp_client, note):
+        with pytest.raises(ToolError) as exc_info:
+            await _call(
+                mcp_client,
+                "write_note",
+                {
+                    "vault": "v",
+                    "path": "doc.md",
+                    "content": "x",
+                    "create_only": True,
+                    "if_match": note.etag,
+                },
+            )
+        assert "not both" in str(exc_info.value)
+        # Rejected before any request reached the vault.
+        assert note.requests == []
+
+    @pytest.mark.parametrize("bad", ["", "   ", '"a"\r\nX-Injected: 1'])
+    async def test_unusable_etag_rejected_before_request(self, mcp_client, note, bad):
+        with pytest.raises(ToolError):
+            await _call(mcp_client, "append_note", self._args("append_note", bad))
+        assert note.requests == []
 
 
 class TestPatchNoteFrontmatter:
