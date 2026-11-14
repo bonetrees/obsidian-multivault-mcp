@@ -1,6 +1,7 @@
 """Tests for ObsidianVaultClient using httpx.MockTransport."""
 
 import json
+import urllib.parse
 
 import httpx
 import pytest
@@ -252,20 +253,90 @@ class TestAppendNote:
             await client.append_note("log.md", "\nnew entry")
 
 
+def markdown_patch_v2_handler(response_factory=None):
+    """Build a handler that emulates obsidian-local-rest-api's PATCH contract.
+
+    The point is to be *strict where the plugin is strict*. The mocks this
+    replaced returned 200 unconditionally and asserted nothing about required
+    headers, which is why the suite stayed green while every live patch_note
+    call 400'd: nothing in the tests could tell a conformant request from a
+    rejected one. This handler refuses exactly what the plugin refuses, so
+    dropping the version header or regressing the heading encoding turns red
+    here instead of in production.
+    """
+
+    def handler(request):
+        version = request.headers.get("markdown-patch-version")
+        if version is None:
+            # errorCode 40084: header targeting is ambiguous between the two
+            # patch formats, so the version must be explicit.
+            return httpx.Response(
+                400,
+                json={
+                    "errorCode": 40084,
+                    "message": "Header-based PATCH targeting requires an explicit "
+                    "'Markdown-Patch-Version' header.",
+                },
+            )
+        if version not in ("1", "2"):
+            return httpx.Response(
+                400,
+                json={"errorCode": 40082, "message": "Invalid patch version header."},
+            )
+        if version == "2":
+            # v1-only headers are never processed under v2; their presence is
+            # itself the error.
+            if request.headers.get("target-delimiter") or request.headers.get(
+                "trim-target-whitespace"
+            ):
+                return httpx.Response(
+                    400,
+                    json={
+                        "errorCode": 40084,
+                        "message": "Target-Delimiter and Trim-Target-Whitespace are "
+                        "never processed under version 2.",
+                    },
+                )
+            if request.headers.get("target-type") == "heading":
+                decoded = urllib.parse.unquote(request.headers.get("target", ""))
+                try:
+                    parsed = json.loads(decoded)
+                except (json.JSONDecodeError, ValueError):
+                    parsed = object()
+                if not (
+                    parsed is None
+                    or (isinstance(parsed, list) and all(isinstance(seg, str) for seg in parsed))
+                ):
+                    return httpx.Response(
+                        400,
+                        json={
+                            "errorCode": 40058,
+                            "message": "A heading 'Target' header must be "
+                            "percent-encoded JSON: an array of heading texts.",
+                        },
+                    )
+        if response_factory is not None:
+            return response_factory(request)
+        return httpx.Response(200)
+
+    return handler
+
+
 class TestPatchNote:
     async def test_success_heading(self):
         seen = {}
 
-        def handler(request):
+        def record(request):
             seen["method"] = request.method
             seen["operation"] = request.headers.get("operation")
             seen["target-type"] = request.headers.get("target-type")
             seen["target"] = request.headers.get("target")
+            seen["version"] = request.headers.get("markdown-patch-version")
             seen["content"] = request.content
             return httpx.Response(200)
 
-        async with make_client(handler) as client:
-            await client.patch_note(
+        async with make_client(markdown_patch_v2_handler(record)) as client:
+            warnings = await client.patch_note(
                 "doc.md",
                 operation="append",
                 target_type="heading",
@@ -275,9 +346,210 @@ class TestPatchNote:
         assert seen["method"] == "PATCH"
         assert seen["operation"] == "append"
         assert seen["target-type"] == "heading"
-        # '::' encoded as %3A%3A with safe=""
-        assert seen["target"] == "Report%3A%3AFindings"
+        assert seen["version"] == "2"
+        # v2 heading targets are percent-encoded JSON arrays, NOT the
+        # delimiter-joined string v1 took: '["Report","Findings"]'.
+        assert seen["target"] == "%5B%22Report%22%2C%22Findings%22%5D"
+        assert json.loads(urllib.parse.unquote(seen["target"])) == ["Report", "Findings"]
         assert seen["content"] == b"\nnew bullet"
+        assert warnings == []
+
+    @pytest.mark.parametrize(
+        ("target", "expected_segments"),
+        [
+            ("Report", ["Report"]),
+            ("Report::Findings", ["Report", "Findings"]),
+            ("Report::Findings::Critical", ["Report", "Findings", "Critical"]),
+            # Whitespace is preserved, not trimmed: v1's opt-in
+            # Trim-Target-Whitespace was never sent, and sending it under v2
+            # is an error, so the caller's exact heading text must survive.
+            ("Report:: Findings ", ["Report", " Findings "]),
+            # Non-ASCII and header-hostile characters must survive the
+            # JSON + percent-encoding round trip.
+            ("Rapport::Findings & Co", ["Rapport", "Findings & Co"]),
+            ("日本語::セクション", ["日本語", "セクション"]),
+        ],
+    )
+    async def test_heading_target_encoded_as_json_array(self, target, expected_segments):
+        seen = {}
+
+        def record(request):
+            seen["target"] = request.headers.get("target")
+            return httpx.Response(200)
+
+        async with make_client(markdown_patch_v2_handler(record)) as client:
+            await client.patch_note(
+                "doc.md",
+                operation="replace",
+                target_type="heading",
+                target=target,
+                content="x",
+            )
+        assert json.loads(urllib.parse.unquote(seen["target"])) == expected_segments
+        # The header itself must be pure ASCII — httpx would reject raw
+        # non-ASCII header bytes, and the plugin percent-decodes before
+        # parsing.
+        assert seen["target"].isascii()
+
+    async def test_v1_only_headers_never_sent(self):
+        # Under v2 the mere presence of Target-Delimiter or
+        # Trim-Target-Whitespace makes the plugin reject the request. This
+        # client must not send them.
+        seen = {}
+
+        def record(request):
+            seen["headers"] = dict(request.headers)
+            return httpx.Response(200)
+
+        async with make_client(markdown_patch_v2_handler(record)) as client:
+            await client.patch_note(
+                "doc.md",
+                operation="append",
+                target_type="heading",
+                target="Report::Findings",
+                content="x",
+            )
+        assert "target-delimiter" not in seen["headers"]
+        assert "trim-target-whitespace" not in seen["headers"]
+
+    @pytest.mark.parametrize(
+        ("headers", "expected_code"),
+        [
+            # The pre-fix request shape: correct in every respect except that
+            # it names no patch version.
+            (
+                {"Operation": "append", "Target-Type": "heading", "Target": "Report%3A%3AFindings"},
+                40084,
+            ),
+            # v1's delimiter-joined heading target, now that a version is
+            # declared — the second half of the migration.
+            (
+                {
+                    "Operation": "append",
+                    "Target-Type": "heading",
+                    "Target": "Report%3A%3AFindings",
+                    "Markdown-Patch-Version": "2",
+                },
+                40058,
+            ),
+            # v1-only headers alongside v2.
+            (
+                {
+                    "Operation": "append",
+                    "Target-Type": "heading",
+                    "Target": "%5B%22Report%22%5D",
+                    "Markdown-Patch-Version": "2",
+                    "Target-Delimiter": "::",
+                },
+                40084,
+            ),
+        ],
+    )
+    def test_contract_handler_rejects_nonconformant_requests(self, headers, expected_code):
+        # Guards the guard. A mock that returns 200 for everything is what let
+        # this bug ship green, so assert directly that the contract handler
+        # refuses each shape the live plugin refuses — otherwise the tests
+        # above could pass for the wrong reason.
+        handler = markdown_patch_v2_handler()
+        response = handler(
+            httpx.Request(
+                "PATCH",
+                "https://127.0.0.1:27124/vault/doc.md",
+                headers=headers,
+                content=b"x",
+            )
+        )
+        assert response.status_code == 400
+        assert json.loads(response.content)["errorCode"] == expected_code
+
+    def test_contract_handler_accepts_the_conformant_request(self):
+        # The positive control for the parametrized rejections above.
+        handler = markdown_patch_v2_handler()
+        response = handler(
+            httpx.Request(
+                "PATCH",
+                "https://127.0.0.1:27124/vault/doc.md",
+                headers={
+                    "Operation": "append",
+                    "Target-Type": "heading",
+                    "Target": "%5B%22Report%22%2C%22Findings%22%5D",
+                    "Markdown-Patch-Version": "2",
+                },
+                content=b"x",
+            )
+        )
+        assert response.status_code == 200
+
+    @pytest.mark.parametrize("code", [40082, 40083, 40084])
+    async def test_patch_version_codes_raise_protocol_mismatch(self, code):
+        # All three version complaints share one diagnostic: the client and
+        # the plugin disagree about the patch format itself, which is neither
+        # a bad target nor a caller error.
+        def handler(_request):
+            return httpx.Response(
+                400,
+                json={"errorCode": code, "message": "Patch version problem."},
+            )
+
+        async with make_client(handler) as client:
+            with pytest.raises(ToolError) as exc_info:
+                await client.patch_note(
+                    "doc.md",
+                    operation="append",
+                    target_type="heading",
+                    target="Report::Findings",
+                    content="x",
+                )
+        msg = str(exc_info.value)
+        assert "PATCH protocol mismatch" in msg
+        # Names the header and the version we send, so the mismatch is
+        # diagnosable without reading the client source.
+        assert "Markdown-Patch-Version: 2" in msg
+        assert "plugin version" in msg
+        assert f"errorCode {code}" in msg
+        assert "doc.md" in msg
+
+    async def test_warnings_surfaced_from_response_header(self):
+        advisories = [
+            {
+                "code": "heading-depth-overflow",
+                "message": 'Created heading "Deep" resolves to level 7.',
+            }
+        ]
+
+        def record(_request):
+            return httpx.Response(
+                200,
+                headers={"Markdown-Patch-Warnings": urllib.parse.quote(json.dumps(advisories))},
+            )
+
+        async with make_client(markdown_patch_v2_handler(record)) as client:
+            warnings = await client.patch_note(
+                "doc.md",
+                operation="append",
+                target_type="heading",
+                target="Report::Findings",
+                content="x",
+            )
+        assert warnings == advisories
+
+    @pytest.mark.parametrize("raw", ["not-json", "%7Bnope", urllib.parse.quote('{"a":1}')])
+    async def test_unparseable_warnings_header_is_dropped_not_raised(self, raw):
+        # Warnings are advisory and arrive on the success path — the write
+        # already happened. A header we can't parse must not be promoted into
+        # a failure that would wrongly suggest nothing was written.
+        def record(_request):
+            return httpx.Response(200, headers={"Markdown-Patch-Warnings": raw})
+
+        async with make_client(markdown_patch_v2_handler(record)) as client:
+            warnings = await client.patch_note(
+                "doc.md",
+                operation="append",
+                target_type="heading",
+                target="Report::Findings",
+                content="x",
+            )
+        assert warnings == []
 
     async def test_invalid_target_raises_specific_error(self):
         def handler(_request):
@@ -308,6 +580,50 @@ class TestPatchNote:
         assert "HTTP 400" in msg
         assert "errorCode 40080" in msg
 
+    async def test_heading_hint_appears_on_404_target_not_found(self):
+        # Under v2 an unmatched heading is a 404 (TargetNotFoundError), not a
+        # 40080 — and a 404 on PATCH otherwise reads identically to "the note
+        # doesn't exist". The hint has to reach this branch or the commonest
+        # caller mistake loses its only clue.
+        def handler(_request):
+            return httpx.Response(404, json={"message": "No heading matched that address."})
+
+        async with make_client(handler) as client:
+            with pytest.raises(NotFound) as exc_info:
+                await client.patch_note(
+                    "doc.md",
+                    operation="append",
+                    target_type="heading",
+                    target="Critical",
+                    content="x",
+                )
+        msg = str(exc_info.value)
+        assert "Not found" in msg
+        assert "full path from the document root" in msg
+
+    async def test_no_heading_hint_for_frontmatter_targets(self):
+        # The old code appended '::' heading advice to *every* 40080,
+        # including frontmatter-key patches where the delimiter is
+        # meaningless. The hint is now opt-in per target type.
+        def handler(_request):
+            return httpx.Response(
+                400, json={"errorCode": 40080, "message": "Could not apply patch."}
+            )
+
+        async with make_client(handler) as client:
+            with pytest.raises(ToolError) as exc_info:
+                await client.patch_note(
+                    "doc.md",
+                    operation="replace",
+                    target_type="frontmatter-key",
+                    target="status",
+                    content="draft",
+                )
+        msg = str(exc_info.value)
+        assert "Invalid PATCH target" in msg
+        assert "document root" not in msg
+        assert "::" not in msg
+
     @pytest.mark.parametrize(
         ("tool_enum", "wire_value"),
         [
@@ -324,12 +640,12 @@ class TestPatchNote:
         # bug. Each tool enum must map to the right wire value.
         seen = {}
 
-        def handler(request):
+        def record(request):
             seen["target-type"] = request.headers.get("target-type")
             return httpx.Response(200)
 
         # Use a JSON-scalar-looking string so frontmatter passes Guard B.
-        async with make_client(handler) as client:
+        async with make_client(markdown_patch_v2_handler(record)) as client:
             await client.patch_note(
                 "doc.md",
                 operation="append",
@@ -345,12 +661,12 @@ class TestPatchNote:
         # value even with a correct Target-Type.
         seen = {}
 
-        def handler(request):
+        def record(request):
             seen["content-type"] = request.headers.get("content-type")
             seen["body"] = request.content
             return httpx.Response(200)
 
-        async with make_client(handler) as client:
+        async with make_client(markdown_patch_v2_handler(record)) as client:
             await client.patch_note(
                 "doc.md",
                 operation="replace",
@@ -358,6 +674,10 @@ class TestPatchNote:
                 target="status",
                 content="published",
             )
+        # Still application/json under v2, where it selects the instruction's
+        # `value` carrier (vs `content` for a text/* body) — which is exactly
+        # the right carrier for a frontmatter value, so the body needed no
+        # change in the migration.
         assert seen["content-type"] == "application/json"
         # Body is JSON-encoded — json.dumps("published") wraps the string
         # in quotes so the plugin sees a JSON string, not a bare token.
@@ -368,12 +688,13 @@ class TestPatchNote:
         # doesn't leak into heading/block. text/markdown + raw body.
         seen = {}
 
-        def handler(request):
+        def record(request):
             seen["content-type"] = request.headers.get("content-type")
             seen["body"] = request.content
+            seen["target"] = request.headers.get("target")
             return httpx.Response(200)
 
-        async with make_client(handler) as client:
+        async with make_client(markdown_patch_v2_handler(record)) as client:
             await client.patch_note(
                 "doc.md",
                 operation="append",
@@ -383,6 +704,10 @@ class TestPatchNote:
             )
         assert seen["content-type"] == "text/markdown"
         assert seen["body"] == b"\nnew bullet"
+        # Only *heading* targets became JSON arrays in v2. Block (and
+        # frontmatter) targets stay opaque percent-encoded strings; wrapping
+        # them in an array would be a second, invented breakage.
+        assert seen["target"] == "findings-summary"
 
     @pytest.mark.parametrize(
         ("content", "kind_label"),
@@ -426,11 +751,11 @@ class TestPatchNote:
         # the literal string back, not silently lose precision/type.
         seen = {}
 
-        def handler(request):
+        def record(request):
             seen["body"] = request.content
             return httpx.Response(200)
 
-        async with make_client(handler) as client:
+        async with make_client(markdown_patch_v2_handler(record)) as client:
             await client.patch_note(
                 "doc.md",
                 operation="replace",
@@ -447,11 +772,11 @@ class TestPatchNote:
         # it through unchanged.
         seen = {}
 
-        def handler(request):
+        def record(request):
             seen["body"] = request.content
             return httpx.Response(200)
 
-        async with make_client(handler) as client:
+        async with make_client(markdown_patch_v2_handler(record)) as client:
             await client.patch_note(
                 "doc.md",
                 operation="replace",

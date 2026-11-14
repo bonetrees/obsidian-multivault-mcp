@@ -35,6 +35,30 @@ class ObsidianVaultClient:
     DATAVIEW_NOT_INSTALLED_CODE = 40070
     INVALID_PATCH_TARGET_CODE = 40080
 
+    # markdown-patch protocol version for header-based PATCH targeting.
+    # obsidian-local-rest-api 5.x serves two incompatible patch formats and
+    # treats header targeting as ambiguous between them, so it *rejects* a
+    # header-targeted PATCH that doesn't name a version (errorCode 40084) —
+    # which is why every patch_note call must carry this header. v1 is still
+    # accepted but the plugin advertises sunset-version="6.0" against it, so
+    # v2 is the only forward-compatible choice.
+    MARKDOWN_PATCH_VERSION = "2"
+    MARKDOWN_PATCH_VERSION_HEADER = "Markdown-Patch-Version"
+
+    # Advisory "applied, but..." notices returned on the v2 success path.
+    PATCH_WARNINGS_HEADER = "Markdown-Patch-Warnings"
+
+    # Protocol-version complaints, as opposed to "your target was wrong":
+    # 40082 unparseable version, 40083 v1-only headers sent without
+    # "Markdown-Patch-Version: 1", 40084 header targeting with no version at
+    # all. All three mean this client and the plugin disagree about the patch
+    # format itself, so they share one diagnostic.
+    PATCH_VERSION_CODES = frozenset({40082, 40083, 40084})
+
+    # Tool-facing heading paths are delimiter-joined ("A::B"); v2 addresses
+    # headings structurally, as a JSON array of segments.
+    HEADING_PATH_DELIMITER = "::"
+
     @classmethod
     def _resolve_timeout_env(cls) -> float:
         raw = os.environ.get("OBSIDIAN_MCP_TIMEOUT")
@@ -183,36 +207,62 @@ class ObsidianVaultClient:
         response: httpx.Response,
         operation: str,
         path: str | None = None,
+        hint: str | None = None,
     ) -> None:
+        """Map an error response to ToolError (or NotFound for HTTP 404).
+
+        ``hint`` appends caller-supplied guidance to the branches where the
+        caller knows something the status code doesn't — currently
+        patch_note's heading-path syntax, which is the likeliest cause of a
+        404 or a failed patch but means nothing on a 401. Passing it in beats
+        hardcoding it here: the old unconditional '::' advice on every 40080
+        told callers patching a *frontmatter key* to go check their heading
+        delimiter.
+        """
         if response.is_success:
             return
         body = self._safe_json_object(response)
         msg = body.get("message") or (response.text.strip() if response.text else "(no body)")
         code = body.get("errorCode")
         location = self._format_location(path)
+        hint_part = f" {hint}" if hint else ""
         if response.status_code == 401:
             raise ToolError(
                 f"Authentication failed for vault '{self.name}' during {operation}"
                 f"{location} (HTTP 401). Check the API key. ({msg})"
             )
         if response.status_code == 404:
-            raise NotFound(f"Not found{location} in vault '{self.name}' during {operation}: {msg}")
+            raise NotFound(
+                f"Not found{location} in vault '{self.name}' during {operation}: "
+                f"{msg}{hint_part}"
+            )
         if response.status_code == 405:
             raise ToolError(
                 f"Operation not supported{location} in vault '{self.name}' "
                 f"during {operation}: {msg}"
             )
+        if code in self.PATCH_VERSION_CODES:
+            # Not the caller's fault and not fixable by changing the target:
+            # this client and the plugin disagree about the patch protocol.
+            # Name the header and the version we send so the mismatch is
+            # diagnosable from one log line, without reading our source.
+            raise ToolError(
+                f"PATCH protocol mismatch for vault '{self.name}' during {operation}"
+                f"{location} (HTTP {response.status_code}, errorCode {code}): {msg}. "
+                f"This client sends '{self.MARKDOWN_PATCH_VERSION_HEADER}: "
+                f"{self.MARKDOWN_PATCH_VERSION}'; the installed obsidian-local-rest-api "
+                "expects a different patch format. Check the plugin version."
+            )
         if code == self.INVALID_PATCH_TARGET_CODE:
             raise ToolError(
                 f"Invalid PATCH target{location} in vault '{self.name}' during "
-                f"{operation} (HTTP {response.status_code}, errorCode {code}): {msg}. "
-                "Heading targets must use the full path from the document root, "
-                "with '::' as the separator (e.g. 'Report::Findings::Critical')."
+                f"{operation} (HTTP {response.status_code}, errorCode {code}): "
+                f"{msg}{hint_part}"
             )
         code_part = f", errorCode {code}" if code is not None else ""
         raise ToolError(
             f"{operation} failed for vault '{self.name}'{location} "
-            f"(HTTP {response.status_code}{code_part}): {msg}"
+            f"(HTTP {response.status_code}{code_part}): {msg}{hint_part}"
         )
 
     async def _request(
@@ -362,6 +412,71 @@ class ObsidianVaultClient:
         "frontmatter-key": "frontmatter",
     }
 
+    # Passed to _raise_for_status as `hint` for heading targets only — see the
+    # patch_note call site for why the 404 branch needs it.
+    HEADING_TARGET_HINT = (
+        "Heading targets must be the full path from the document root, with "
+        "'::' as the separator (e.g. 'Report::Findings::Critical') — a bare "
+        "child heading will not match."
+    )
+
+    @classmethod
+    def _encode_patch_target(cls, wire_target_type: str, target: str) -> str:
+        """Percent-encode the Target header for one markdown-patch v2 request.
+
+        Tool-facing heading paths stay delimiter-joined ('Report::Findings'),
+        but v2 addresses headings structurally: the header carries
+        percent-encoded JSON — an array of heading texts — so the plugin never
+        has to guess where one heading name ends and the next begins. The
+        delimiter is therefore a detail of this client's tool API rather than a
+        wire concern. It is still a real limit, just a self-imposed one now: a
+        heading whose own text contains '::' cannot be addressed, because the
+        split here can't tell it apart from a path separator. The wire format
+        could express it; the tool API can't.
+
+        Segments are deliberately NOT trimmed. v1 had an opt-in
+        Trim-Target-Whitespace header that this client never sent, and sending
+        it under v2 is itself an error (40084), so passing the caller's exact
+        heading text through keeps behaviour identical across the migration.
+
+        Block and frontmatter targets are opaque strings in both versions.
+        """
+        if wire_target_type != "heading":
+            return urllib.parse.quote(target, safe="")
+        segments = target.split(cls.HEADING_PATH_DELIMITER)
+        # Compact separators keep the header short; the plugin JSON.parses it.
+        return urllib.parse.quote(json.dumps(segments, separators=(",", ":")), safe="")
+
+    def _parse_patch_warnings(self, response: httpx.Response) -> list[dict]:
+        """Extract the advisory notices a successful v2 patch can carry.
+
+        The plugin reports "applied, but..." conditions (e.g. a created
+        heading nested past Markdown's six levels, which leaves it not
+        structurally addressable) as percent-encoded JSON in a response
+        header. These are advisory by construction — the write already
+        happened — so a header this client can't parse is logged and dropped
+        rather than converted into a failure that would wrongly imply nothing
+        was written.
+        """
+        raw = response.headers.get(self.PATCH_WARNINGS_HEADER)
+        if not raw:
+            return []
+        try:
+            parsed = json.loads(urllib.parse.unquote(raw))
+        except (json.JSONDecodeError, ValueError):
+            parsed = None
+        if not isinstance(parsed, list):
+            logger.warning(
+                "Ignoring unparseable %s header from vault '%s': %r",
+                self.PATCH_WARNINGS_HEADER,
+                self.name,
+                raw,
+            )
+            return []
+        # Entries are {"code": ..., "message": ...} objects; wrap anything
+        # else so the tool layer always hands back a uniform list of dicts.
+        return [entry if isinstance(entry, dict) else {"message": str(entry)} for entry in parsed]
+
     async def patch_note(
         self,
         path: str,
@@ -369,12 +484,19 @@ class ObsidianVaultClient:
         target_type: str,
         target: str,
         content: str,
-    ) -> None:
+    ) -> list[dict]:
+        """Apply one surgical edit; returns the patch's advisory warnings."""
         wire_target_type = self._TARGET_TYPE_WIRE.get(target_type, target_type)
         headers = {
             "Operation": operation,
             "Target-Type": wire_target_type,
-            "Target": urllib.parse.quote(target, safe=""),
+            "Target": self._encode_patch_target(wire_target_type, target),
+            # Required: header targeting without an explicit version is
+            # rejected outright (40084). Note that Target-Delimiter and
+            # Trim-Target-Whitespace must NOT accompany this — the plugin
+            # reads either one as a v1 request and 40084s. This client has
+            # never sent them; don't start.
+            self.MARKDOWN_PATCH_VERSION_HEADER: self.MARKDOWN_PATCH_VERSION,
         }
         # Frontmatter PATCH bodies are interpreted as JSON by the plugin, which
         # enables intelligent merging of structured values. A scalar string
@@ -421,7 +543,17 @@ class ObsidianVaultClient:
             content=body,
             headers=headers,
         )
-        self._raise_for_status(response, "patch_note", path)
+        # The heading hint rides along only for heading targets. Under v2 an
+        # unmatched heading comes back as 404 (TargetNotFoundError) rather
+        # than 40080, and a 404 on PATCH is otherwise indistinguishable from
+        # "the note itself doesn't exist" — so the hint has to cover both.
+        self._raise_for_status(
+            response,
+            "patch_note",
+            path,
+            hint=self.HEADING_TARGET_HINT if wire_target_type == "heading" else None,
+        )
+        return self._parse_patch_warnings(response)
 
     async def delete_note(self, path: str) -> None:
         response = await self._request(

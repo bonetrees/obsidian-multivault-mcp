@@ -6,10 +6,13 @@ on the curated response shape.
 """
 
 import json
+import urllib.parse
 
 import httpx
 import pytest
 from fastmcp.exceptions import ToolError
+
+from obsidian_multivault_mcp.client import ObsidianVaultClient
 
 
 # ---------- helpers ----------
@@ -232,6 +235,14 @@ class TestPatchNote:
             if request.method == "PATCH" and request.url.path == "/vault/doc.md":
                 assert request.headers["operation"] == "append"
                 assert request.headers["target-type"] == "heading"
+                # markdown-patch v2: the version header is mandatory for
+                # header-based targeting and the heading target is a
+                # percent-encoded JSON array, not a '::'-joined string.
+                assert request.headers["markdown-patch-version"] == "2"
+                assert json.loads(urllib.parse.unquote(request.headers["target"])) == [
+                    "Report",
+                    "Findings",
+                ]
                 return httpx.Response(200)
             return httpx.Response(404)
 
@@ -252,7 +263,35 @@ class TestPatchNote:
         )
         assert data["status"] == "patched"
         assert data["operation"] == "append"
+        # The tool API is unchanged by the v2 migration — callers still pass
+        # and get back the '::' path; the JSON-array translation is internal.
         assert data["target"] == "Report::Findings"
+        assert data["warnings"] == []
+
+    async def test_patch_warnings_reach_the_caller(self, mcp_client, monkeypatch):
+        # A patch can succeed and still be worth flagging. The advisory has to
+        # survive the whole client → tool → FastMCP path or callers silently
+        # lose "applied, but...".
+        advisories = [{"code": "heading-depth-overflow", "message": "level 7"}]
+
+        async def fake_patch(*_args, **_kwargs):
+            return advisories
+
+        monkeypatch.setattr(ObsidianVaultClient, "patch_note", fake_patch)
+        data = await _call(
+            mcp_client,
+            "patch_note",
+            {
+                "vault": "v",
+                "path": "doc.md",
+                "operation": "append",
+                "target_type": "heading",
+                "target": "Report::Findings",
+                "content": "\nnew row",
+            },
+        )
+        assert data["status"] == "patched"
+        assert data["warnings"] == advisories
 
 
 class TestPatchNoteFrontmatter:

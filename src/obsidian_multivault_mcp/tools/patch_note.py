@@ -60,9 +60,16 @@ async def patch_note(
       (everything down to the next same-or-higher-level heading). To edit
       only a parent's intro text without touching children, target the
       deepest specific heading instead.
+
+    The response carries a `warnings` list. It is normally empty; a
+    non-empty entry means the patch **was applied** but something about
+    the result is worth knowing (e.g. a created heading nested deeper
+    than Markdown's six levels, which leaves it unaddressable by later
+    `heading` patches). Warnings are not failures — a failed patch
+    raises instead.
     """
     client = get_client(ctx, vault)
-    await client.patch_note(
+    warnings = await client.patch_note(
         path=path,
         operation=operation,
         target_type=target_type,
@@ -76,4 +83,5 @@ async def patch_note(
         "operation": operation,
         "target_type": target_type,
         "target": target,
+        "warnings": warnings,
     }
