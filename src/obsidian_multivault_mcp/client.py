@@ -503,6 +503,21 @@ class ObsidianVaultClient:
         "child heading will not match."
     )
 
+    # Frontmatter counterpart to HEADING_TARGET_HINT. It rides on both the
+    # 404 branch (key absent — under v2 that's "could not resolve frontmatter
+    # target", which otherwise reads like the note is missing) and the 40080
+    # branch (append/prepend across mismatched types, "not mergeable").
+    FRONTMATTER_TARGET_HINT = (
+        "If the note exists but the frontmatter key doesn't, pass "
+        "create_if_missing=True to create it. append/prepend only merge two "
+        "lists, two objects, or two strings; use replace to change a value's type."
+    )
+
+    # Opt-in key creation. v1 header that v2 still honours for frontmatter
+    # targets (verified against 5.5.2, including on a note with no
+    # frontmatter block at all, which it creates).
+    CREATE_TARGET_HEADER = "Create-Target-If-Missing"
+
     @classmethod
     def _encode_patch_target(cls, wire_target_type: str, target: str) -> str:
         """Percent-encode the Target header for one markdown-patch v2 request.
@@ -560,35 +575,26 @@ class ObsidianVaultClient:
         # else so the tool layer always hands back a uniform list of dicts.
         return [entry if isinstance(entry, dict) else {"message": str(entry)} for entry in parsed]
 
-    async def patch_note(
+    def _patch_body(
         self,
-        path: str,
-        operation: str,
-        target_type: str,
+        wire_target_type: str,
+        location: str,
         target: str,
-        content: str,
-        if_match: str | None = None,
-    ) -> tuple[list[dict], str | None]:
-        """Apply one surgical edit; returns (advisory warnings, new etag)."""
-        wire_target_type = self._TARGET_TYPE_WIRE.get(target_type, target_type)
-        headers = {
-            "Operation": operation,
-            "Target-Type": wire_target_type,
-            "Target": self._encode_patch_target(wire_target_type, target),
-            # Required: header targeting without an explicit version is
-            # rejected outright (40084). Note that Target-Delimiter and
-            # Trim-Target-Whitespace must NOT accompany this — the plugin
-            # reads either one as a v1 request and 40084s. This client has
-            # never sent them; don't start.
-            self.MARKDOWN_PATCH_VERSION_HEADER: self.MARKDOWN_PATCH_VERSION,
-            **self._precondition_headers(if_match),
-        }
+        content: str | None,
+        value: Any,
+    ) -> tuple[str, bytes]:
+        """Return (Content-Type, body) for one PATCH, enforcing Guard B."""
         # Frontmatter PATCH bodies are interpreted as JSON by the plugin, which
         # enables intelligent merging of structured values. A scalar string
         # round-trips correctly through json.dumps — e.g. json.dumps("done")
         # yields the 6-byte JSON-string b'"done"' (quotes included), which the
-        # plugin then writes as the YAML string "done". Array values are a
-        # separate, unsolved case (the tool types content as str).
+        # plugin then writes as the YAML string "done". Lists and objects take
+        # a separate path: the caller declares them by passing `value`.
+        if value is not None:
+            # Already a JSON value — no parsing, no guessing. application/json
+            # selects v2's `value` carrier, which takes any JSON (the plugin
+            # parses with express.json({strict: false})).
+            return "application/json", json.dumps(value).encode("utf-8")
         if wire_target_type == "frontmatter":
             # Guard B (parse-to-reject): patch_note frontmatter is scalar-only.
             # If content parses as a JSON array/object the caller almost
@@ -606,21 +612,68 @@ class ObsidianVaultClient:
             if isinstance(parsed, (list, dict)):
                 # Match _raise_for_status' message shape (vault + operation +
                 # location) so a Guard B failure is diagnosable from a log
-                # line alone — there's no HTTP response to lean on. Don't
-                # name a successor tool: pointing callers at something that
-                # doesn't exist yet is worse than naming nothing.
-                location = self._format_location(path)
+                # line alone — there's no HTTP response to lean on. Point at
+                # `value`: the caller almost certainly meant structure, and
+                # that's the parameter that can say so unambiguously.
                 raise ToolError(
-                    f"patch_note frontmatter targets are scalar-only for vault "
+                    f"patch_note frontmatter 'content' is scalar-only for vault "
                     f"'{self.name}'{location}, but content for '{target}' looks like "
-                    f"a JSON {type(parsed).__name__}. Array or object frontmatter "
-                    f"is not supported by this tool."
+                    f"a JSON {type(parsed).__name__}. To write a real "
+                    f"{type(parsed).__name__}, pass it as 'value' (a JSON "
+                    f"{type(parsed).__name__}, not a string) instead of 'content'."
                 )
-            headers["Content-Type"] = "application/json"
-            body = json.dumps(content).encode("utf-8")
-        else:
-            headers["Content-Type"] = "text/markdown"
-            body = content.encode("utf-8")
+            return "application/json", json.dumps(content).encode("utf-8")
+        return "text/markdown", content.encode("utf-8")
+
+    async def patch_note(
+        self,
+        path: str,
+        operation: str,
+        target_type: str,
+        target: str,
+        content: str | None = None,
+        if_match: str | None = None,
+        value: Any = None,
+        create_if_missing: bool = False,
+    ) -> tuple[list[dict], str | None]:
+        """Apply one surgical edit; returns (advisory warnings, new etag).
+
+        Exactly one of ``content`` (text) or ``value`` (any JSON value except
+        null, frontmatter targets only) must be given. ``value`` is how a
+        caller says "this is structured": it is serialised as-is, so a list
+        lands as a YAML list. ``content`` is never parsed into structure —
+        see Guard B below for why that direction is unsafe.
+        """
+        wire_target_type = self._TARGET_TYPE_WIRE.get(target_type, target_type)
+        location = self._format_location(path)
+        if (content is None) == (value is None):
+            raise ToolError(
+                f"patch_note for vault '{self.name}'{location}: pass exactly one of "
+                "'content' or 'value'."
+            )
+        if wire_target_type != "frontmatter" and (value is not None or create_if_missing):
+            raise ToolError(
+                f"patch_note for vault '{self.name}'{location}: 'value' and "
+                "create_if_missing apply only to frontmatter-key targets; use "
+                f"'content' for {target_type} targets."
+            )
+        headers = {
+            "Operation": operation,
+            "Target-Type": wire_target_type,
+            "Target": self._encode_patch_target(wire_target_type, target),
+            # Required: header targeting without an explicit version is
+            # rejected outright (40084). Note that Target-Delimiter and
+            # Trim-Target-Whitespace must NOT accompany this — the plugin
+            # reads either one as a v1 request and 40084s. This client has
+            # never sent them; don't start.
+            self.MARKDOWN_PATCH_VERSION_HEADER: self.MARKDOWN_PATCH_VERSION,
+            **self._precondition_headers(if_match),
+        }
+        if create_if_missing:
+            headers[self.CREATE_TARGET_HEADER] = "true"
+        headers["Content-Type"], body = self._patch_body(
+            wire_target_type, location, target, content, value
+        )
         response = await self._request(
             "PATCH",
             f"/vault/{self._encode_path(path)}",
@@ -628,16 +681,15 @@ class ObsidianVaultClient:
             content=body,
             headers=headers,
         )
-        # The heading hint rides along only for heading targets. Under v2 an
-        # unmatched heading comes back as 404 (TargetNotFoundError) rather
-        # than 40080, and a 404 on PATCH is otherwise indistinguishable from
-        # "the note itself doesn't exist" — so the hint has to cover both.
-        self._raise_for_status(
-            response,
-            "patch_note",
-            path,
-            hint=self.HEADING_TARGET_HINT if wire_target_type == "heading" else None,
-        )
+        # Hints are per target type. Under v2 an unmatched heading or a missing
+        # frontmatter key comes back as 404 rather than 40080, and a 404 on
+        # PATCH is otherwise indistinguishable from "the note itself doesn't
+        # exist" — so each hint has to cover both readings.
+        hint = {
+            "heading": self.HEADING_TARGET_HINT,
+            "frontmatter": self.FRONTMATTER_TARGET_HINT,
+        }.get(wire_target_type)
+        self._raise_for_status(response, "patch_note", path, hint=hint)
         return self._parse_patch_warnings(response), self._etag(response)
 
     async def delete_note(self, path: str, if_match: str | None = None) -> None:

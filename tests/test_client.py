@@ -8,7 +8,7 @@ import pytest
 from fastmcp.exceptions import ToolError
 
 from obsidian_multivault_mcp.client import NotFound, ObsidianVaultClient, PreconditionFailed
-from tests.plugin_fakes import FakeVaultNote, content_etag
+from tests.plugin_fakes import FakeFrontmatterNote, FakeVaultNote, content_etag
 
 
 def make_client(handler, **overrides) -> ObsidianVaultClient:
@@ -969,6 +969,180 @@ class TestPreconditions:
     def test_etag_drops_missing_and_weak_tags(self, header):
         headers = {} if header is None else {"ETag": header}
         assert ObsidianVaultClient._etag(httpx.Response(200, headers=headers)) is None
+
+
+def frontmatter_client(note: FakeFrontmatterNote):
+    """Client whose PATCHes must satisfy both the v2 contract and the fake."""
+    return make_client(markdown_patch_v2_handler(note.handler))
+
+
+async def _patch_fm(client, operation="replace", target="tags", **kwargs):
+    return await client.patch_note(
+        "doc.md", operation=operation, target_type="frontmatter-key", target=target, **kwargs
+    )
+
+
+class TestFrontmatterFake:
+    """Guard the guard: the structured-frontmatter tests are only as good as
+    this fake's fidelity to the plugin's merge rules."""
+
+    @staticmethod
+    def _patch(note, operation, key, value, **headers):
+        with httpx.Client(transport=httpx.MockTransport(note.handler)) as http:
+            return http.patch(
+                "http://x/vault/doc.md",
+                content=json.dumps(value).encode(),
+                headers={
+                    "Operation": operation,
+                    "Target-Type": "frontmatter",
+                    "Target": urllib.parse.quote(key, safe=""),
+                    "Content-Type": "application/json",
+                    **headers,
+                },
+            )
+
+    @pytest.mark.parametrize(
+        ("operation", "old", "new", "expected"),
+        [
+            ("append", ["a", "b"], ["a"], ["a", "b", "a"]),  # duplicates kept
+            ("prepend", ["a"], ["z"], ["z", "a"]),
+            ("append", {"o": 1, "p": 2}, {"o": 9}, {"o": 9, "p": 2}),  # new wins
+            ("prepend", {"o": 1}, {"o": 9, "x": 0}, {"o": 1, "x": 0}),  # existing wins
+            ("append", "draft", "-x", "draft-x"),
+            ("replace", ["a"], {"k": "v"}, {"k": "v"}),  # replace may change type
+        ],
+    )
+    def test_merge_rules(self, operation, old, new, expected):
+        note = FakeFrontmatterNote("doc.md", {"k": old})
+        assert self._patch(note, operation, "k", new).status_code == 200
+        assert note.frontmatter["k"] == expected
+
+    @pytest.mark.parametrize(("old", "new"), [(["a"], "b"), ("a", ["b"]), (["a"], {"k": 1})])
+    def test_mismatched_merge_is_40080(self, old, new):
+        note = FakeFrontmatterNote("doc.md", {"k": old})
+        response = self._patch(note, "append", "k", new)
+        assert (response.status_code, response.json()["errorCode"]) == (400, 40080)
+        assert note.frontmatter["k"] == old
+
+    def test_missing_key_is_404_unless_create_requested(self):
+        note = FakeFrontmatterNote("doc.md")
+        assert self._patch(note, "replace", "tags", ["a"]).status_code == 404
+        assert "tags" not in note.frontmatter
+        response = self._patch(
+            note, "append", "tags", ["a"], **{"Create-Target-If-Missing": "true"}
+        )
+        assert response.status_code == 200
+        assert note.frontmatter["tags"] == ["a"]
+
+
+class TestStructuredFrontmatter:
+    async def test_list_value_lands_as_a_real_list(self):
+        # Acceptance criterion: a list written via `value` is a list, not
+        # the string '["project", "urgent"]'.
+        note = FakeFrontmatterNote("doc.md", {"tags": ["old"]})
+        async with frontmatter_client(note) as client:
+            await _patch_fm(client, value=["project", "urgent"])
+        assert note.frontmatter["tags"] == ["project", "urgent"]
+        assert note.requests[-1].content == b'["project", "urgent"]'
+        assert note.requests[-1].headers["content-type"] == "application/json"
+
+    @pytest.mark.parametrize(
+        ("operation", "old", "value", "expected"),
+        [
+            ("append", ["a"], ["b"], ["a", "b"]),
+            ("prepend", ["a"], ["b"], ["b", "a"]),
+            ("append", {"owner": "sim"}, {"due": "soon"}, {"owner": "sim", "due": "soon"}),
+            ("replace", {"owner": "sim"}, {"nested": {"deep": [1]}}, {"nested": {"deep": [1]}}),
+        ],
+    )
+    async def test_structured_operations(self, operation, old, value, expected):
+        note = FakeFrontmatterNote("doc.md", {"k": old})
+        async with frontmatter_client(note) as client:
+            await _patch_fm(client, operation=operation, target="k", value=value)
+        assert note.frontmatter["k"] == expected
+
+    @pytest.mark.parametrize(
+        ("value", "kind"), [(2, int), (2.5, float), (True, bool), ("1.0", str)]
+    )
+    async def test_scalar_values_keep_their_json_type(self, value, kind):
+        # `value` is how a caller writes a real number or boolean; a string
+        # passed as `value` stays a string, same as via `content`.
+        note = FakeFrontmatterNote("doc.md", {"k": "x"})
+        async with frontmatter_client(note) as client:
+            await _patch_fm(client, target="k", value=value)
+        assert note.frontmatter["k"] == value
+        assert type(note.frontmatter["k"]) is kind
+
+    @pytest.mark.parametrize("kwargs", [{}, {"content": "a", "value": ["a"]}])
+    async def test_exactly_one_of_content_or_value(self, kwargs):
+        note = FakeFrontmatterNote("doc.md", {"tags": []})
+        async with frontmatter_client(note) as client:
+            with pytest.raises(ToolError) as exc_info:
+                await _patch_fm(client, **kwargs)
+        assert "exactly one of 'content' or 'value'" in str(exc_info.value)
+        assert note.requests == []
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [{"value": ["a"]}, {"content": "x", "create_if_missing": True}],
+    )
+    @pytest.mark.parametrize("target_type", ["heading", "block-reference"])
+    async def test_frontmatter_only_options_rejected_elsewhere(self, kwargs, target_type):
+        calls = []
+
+        def handler(request):
+            calls.append(request)
+            return httpx.Response(200)
+
+        async with make_client(handler) as client:
+            with pytest.raises(ToolError) as exc_info:
+                await client.patch_note(
+                    "doc.md", operation="append", target_type=target_type, target="X", **kwargs
+                )
+        assert "frontmatter-key targets" in str(exc_info.value)
+        assert not calls
+
+    async def test_missing_key_points_at_create_if_missing(self):
+        note = FakeFrontmatterNote("doc.md")
+        async with frontmatter_client(note) as client:
+            with pytest.raises(NotFound) as exc_info:
+                await _patch_fm(client, value=["a"])
+        assert "create_if_missing=True" in str(exc_info.value)
+
+    async def test_create_if_missing_creates_the_key(self):
+        note = FakeFrontmatterNote("doc.md")
+        async with frontmatter_client(note) as client:
+            await _patch_fm(client, operation="append", value=["a"], create_if_missing=True)
+        assert note.frontmatter == {"tags": ["a"]}
+        assert note.requests[-1].headers["create-target-if-missing"] == "true"
+
+    async def test_create_header_absent_by_default(self):
+        note = FakeFrontmatterNote("doc.md", {"tags": []})
+        async with frontmatter_client(note) as client:
+            await _patch_fm(client, value=["a"])
+        assert "create-target-if-missing" not in note.requests[-1].headers
+
+    async def test_type_mismatch_explains_merge_rules(self):
+        note = FakeFrontmatterNote("doc.md", {"tags": ["a"]})
+        async with frontmatter_client(note) as client:
+            with pytest.raises(ToolError) as exc_info:
+                await _patch_fm(client, operation="append", value="b")
+        msg = str(exc_info.value)
+        assert "not mergeable" in msg  # the plugin's own diagnosis survives
+        assert "use replace to change a value's type" in msg
+        assert note.frontmatter["tags"] == ["a"]
+
+    async def test_list_shaped_content_is_directed_to_value(self):
+        # The ambiguous case still refuses (Guard B), but now says how to
+        # express what the caller almost certainly meant.
+        note = FakeFrontmatterNote("doc.md", {"tags": []})
+        async with frontmatter_client(note) as client:
+            with pytest.raises(ToolError) as exc_info:
+                await _patch_fm(client, content='["a", "b"]')
+        msg = str(exc_info.value)
+        assert "scalar-only" in msg
+        assert "pass it as 'value'" in msg
+        assert note.requests == []
 
 
 class TestDeleteNote:

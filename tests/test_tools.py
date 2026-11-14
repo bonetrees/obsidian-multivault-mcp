@@ -13,7 +13,7 @@ import pytest
 from fastmcp.exceptions import ToolError
 
 from obsidian_multivault_mcp.client import ObsidianVaultClient
-from tests.plugin_fakes import FakeVaultNote
+from tests.plugin_fakes import FakeFrontmatterNote, FakeVaultNote
 
 
 # ---------- helpers ----------
@@ -387,6 +387,63 @@ class TestPreconditions:
         with pytest.raises(ToolError):
             await _call(mcp_client, "append_note", self._args("append_note", bad))
         assert note.requests == []
+
+
+class TestPatchNoteStructuredFrontmatter:
+    """`value` survives the MCP JSON boundary with its JSON type intact."""
+
+    @pytest.fixture
+    def note(self):
+        return FakeFrontmatterNote("doc.md", {"tags": ["alpha"], "status": "draft"})
+
+    @pytest.fixture
+    def vault_handlers(self, note):
+        return {"v": note.handler}
+
+    @staticmethod
+    def _args(**kwargs):
+        base = {
+            "vault": "v",
+            "path": "doc.md",
+            "operation": "replace",
+            "target_type": "frontmatter-key",
+            "target": "tags",
+        }
+        return {**base, **kwargs}
+
+    async def test_list_round_trips_as_a_list(self, mcp_client, note):
+        await _call(mcp_client, "patch_note", self._args(operation="append", value=["beta"]))
+        data = await _call(mcp_client, "read_note", {"vault": "v", "path": "doc.md"})
+        assert data["frontmatter"]["tags"] == ["alpha", "beta"]
+
+    @pytest.mark.parametrize("value", [2, 2.5, True, "1.0", {"owner": "sim", "n": [1, None]}])
+    async def test_json_types_preserved_end_to_end(self, mcp_client, note, value):
+        await _call(mcp_client, "patch_note", self._args(target="status", value=value))
+        assert note.frontmatter["status"] == value
+        assert type(note.frontmatter["status"]) is type(value)
+
+    @pytest.mark.parametrize("content", ["1.0", "true", "null"])
+    async def test_content_still_writes_strings(self, mcp_client, note, content):
+        # The scalar contract is unchanged: `content` never becomes a number,
+        # boolean or null, however much it looks like one.
+        await _call(mcp_client, "patch_note", self._args(target="status", content=content))
+        assert note.frontmatter["status"] == content
+
+    async def test_create_if_missing(self, mcp_client, note):
+        await _call(
+            mcp_client,
+            "patch_note",
+            self._args(target="aliases", value=["a"], create_if_missing=True),
+        )
+        assert note.frontmatter["aliases"] == ["a"]
+
+    async def test_schema_lists_accepted_value_types(self, mcp_client):
+        tool = next(t for t in await mcp_client.list_tools() if t.name == "patch_note")
+        value_types = {
+            option.get("type") for option in tool.inputSchema["properties"]["value"]["anyOf"]
+        }
+        assert {"array", "object", "string", "boolean", "integer", "number"} <= value_types
+        assert "content" not in tool.inputSchema["required"]
 
 
 class TestPatchNoteFrontmatter:

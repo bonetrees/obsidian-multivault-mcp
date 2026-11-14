@@ -1,10 +1,12 @@
 """Tool: patch_note — surgical edit by heading, block reference, or frontmatter key."""
 
 from fastmcp import Context
+from pydantic import StrictBool
 
 from ..server import get_client, mcp
 from ..validation_types import (
     ETag,
+    FrontmatterValue,
     PatchOperation,
     PatchTargetType,
     VaultFilePath,
@@ -23,8 +25,10 @@ async def patch_note(
     operation: PatchOperation,
     target_type: PatchTargetType,
     target: str,
-    content: str,
+    content: str | None = None,
     if_match: ETag | None = None,
+    value: FrontmatterValue | None = None,
+    create_if_missing: StrictBool = False,
 ) -> dict:
     """Surgically edit a note by targeting a specific section.
 
@@ -42,15 +46,23 @@ async def patch_note(
     - `target_type="block-reference"` — `target` is the block ID (the
       `^block-id` at the end of a block, without the `^`).
     - `target_type="frontmatter-key"` — `target` is the YAML key name
-      (e.g. `status`, `date`, `title`). **Scalar-valued keys only** —
-      `content` is typed as `str` and the value is written verbatim as
-      a YAML string (so `content="1.0"` writes the string `"1.0"`, not
-      the number `1.0`; the same applies to date- and boolean-looking
-      input). Array- or object-valued keys (e.g. `tags`) are not
-      supported by this tool; content that parses as a JSON array/
-      object is rejected with a clear error.
+      (e.g. `status`, `date`, `tags`). Give the new value as **one of**:
+      - `content` (a string): always written as a YAML *string* —
+        `content="1.0"` writes the string `"1.0"`, not the number; the
+        same goes for `"true"` and `"null"`. A string that looks like a
+        JSON list/object is rejected, because it's ambiguous.
+      - `value` (any JSON except null): written as that JSON type. Use
+        this for lists, objects, numbers and booleans:
+        `value=["project", "urgent"]` writes a real YAML list,
+        `value={"owner": "sim"}` a map, `value=2` a number. Pass the
+        list itself, not a string containing it.
 
-    **Operations:**
+      A key that doesn't exist yet fails unless `create_if_missing=True`
+      (which also creates the frontmatter block if the note has none).
+      `value` and `create_if_missing` are for frontmatter-key targets
+      only.
+
+    **Operations** (`content` is required for heading and block targets):
 
     - `append` — add content after the targeted section. **Include a
       leading `\\n` in `content`** — the API does not add newlines
@@ -62,6 +74,13 @@ async def patch_note(
       (everything down to the next same-or-higher-level heading). To edit
       only a parent's intro text without touching children, target the
       deepest specific heading instead.
+
+    **Frontmatter merge rules** (`append`/`prepend` on a frontmatter
+    key): two lists are concatenated (duplicates kept); two objects are
+    shallow-merged, with the new keys winning on `append` and the
+    existing keys winning on `prepend`; two strings are concatenated.
+    Mixed types (e.g. a string onto a list) are refused — use `replace`
+    to change a value's type.
 
     The response carries a `warnings` list. It is normally empty; a
     non-empty entry means the patch **was applied** but something about
@@ -86,6 +105,8 @@ async def patch_note(
         target=target,
         content=content,
         if_match=if_match,
+        value=value,
+        create_if_missing=create_if_missing,
     )
     return {
         "vault": vault,

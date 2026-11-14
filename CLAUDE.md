@@ -47,7 +47,7 @@ tests/
 ├── test_main.py         # CLI helpers (_env_int, _parse_args, _strip_host_brackets) and main() integration
 ├── test_curators.py
 ├── test_client.py       # httpx.MockTransport
-├── plugin_fakes.py      # FakeVaultNote: stateful fake of the plugin's ETag / If-Match contract
+├── plugin_fakes.py      # Stateful plugin fakes: FakeVaultNote (ETag / If-Match), FakeFrontmatterNote (v2 frontmatter merge rules)
 └── test_tools.py        # FastMCP Client(mcp) integration
 ```
 
@@ -105,6 +105,8 @@ Transport errors are caught in `_request()` and mapped to `ToolError`.
 | HTTP 400 + `errorCode: 40080` | `_raise_for_status` | `ToolError`: invalid PATCH target (+ `hint` when the caller passed one) |
 | HTTP 400 + `errorCode: 40082/40083/40084` | `_raise_for_status` | `ToolError`: "PATCH protocol mismatch" — client/plugin disagree on the markdown-patch format. Names the version header we send; check the plugin version |
 | HTTP 409 (patch) | `_raise_for_status` (generic) | `ToolError`: content preexists / frontmatter key collision |
+| HTTP 404 on a frontmatter PATCH | `_raise_for_status` + `FRONTMATTER_TARGET_HINT` | `NotFound`: the *key* is absent (plugin: "could not resolve frontmatter target"); hint names `create_if_missing=True` |
+| HTTP 400 + `errorCode: 40080` "not mergeable" | `_raise_for_status` + `FRONTMATTER_TARGET_HINT` | `ToolError`: append/prepend across mismatched types; hint says to use `replace` |
 | HTTP 412 / `errorCode: 41200` | `_raise_for_status` | `PreconditionFailed` (subclass of `ToolError`): note changed since the caller's `if_match` version (or exists, for `create_only`); nothing was written |
 | HTTP 400 + `errorCode: 40024` | `_raise_for_status` | `ToolError`: "Malformed etag" — deliberately *not* `PreconditionFailed`, since re-reading and retrying can't fix a mangled tag |
 | `httpx.ConnectError` | `_request` | `ToolError`: "Cannot connect…, is Obsidian running?" |
@@ -128,7 +130,22 @@ The **tool API is unchanged**: callers still pass the full heading path from the
 
 Under v2 an unmatched heading comes back as **404** (`TargetNotFoundError`), not `40080`. Since a 404 on PATCH otherwise reads identically to "the note doesn't exist", `patch_note` passes `HEADING_TARGET_HINT` into `_raise_for_status(..., hint=...)` for heading targets only. Don't hardcode that hint in `_raise_for_status` again — it used to fire on every `40080`, including frontmatter-key patches where the `::` advice is meaningless.
 
-Not yet implemented from v5.x: the v2 `delete` operation, path-element targeting (`/vault/note.md/heading/My%20Heading`), and array/object frontmatter via the `value` carrier (Guard B's scalar-only rule is now self-imposed, not a plugin limit).
+Not yet implemented from v5.x: the v2 `delete` operation and path-element targeting (`/vault/note.md/heading/My%20Heading`).
+
+### Structured frontmatter: `content` vs `value`
+
+`patch_note` takes **exactly one** of `content` or `value` for frontmatter-key targets:
+
+- **`content: str` is always a YAML string.** It is never parsed into a value. `"1.0"`, `"true"` and `"null"` stay strings. **Guard B** (in `_patch_body`) is *parse-to-reject*: if `content` parses as a JSON list or object, the call fails and points the caller at `value`. The parse result is only a yes/no signal and is thrown away. Parse-to-*coerce* would silently turn `"1.0"` into `1.0`. Don't "simplify" it into that.
+- **`value: FrontmatterValue` is the caller saying "this is structured".** It's any JSON except null, typed at the tool boundary (`validation_types.FrontmatterValue`, spelled out so the schema isn't an empty `{}`). It's sent as-is, `application/json`, i.e. v2's `value` carrier. The JSON type of the MCP argument *is* the signal, so nothing is sniffed from a string. Null is excluded because `None` means "not provided".
+- `value` and `create_if_missing` are frontmatter-only. Both are rejected before any request for heading or block targets.
+
+Plugin semantics, probed live on 5.5.2 and modelled by `tests/plugin_fakes.py::FakeFrontmatterNote`:
+
+- `replace` sets the key to any type.
+- `append`/`prepend` merge two lists (concatenated, **duplicates kept**), two objects (shallow; **new keys win on `append`, existing keys win on `prepend`**) or two strings. Any other pairing is `400/40080` "not mergeable".
+- A missing key is **404 for every operation** unless `Create-Target-If-Missing: true` (`create_if_missing=True`), which creates the key, and the frontmatter block too if the note has none. That header is v1-era, but v2 still honours it for frontmatter. It is *not* verified for heading/block targets, hence frontmatter-only.
+- A date-shaped string (`"2026-12-01"`) is written **unquoted**, but `read_note` still returns it as a string. Obsidian's Properties UI may display it as a date. This predates `value`; it happens via `content` too.
 
 ### Search endpoints differ by type
 
@@ -159,7 +176,7 @@ Both `append_note` (POST) and `patch_note` with `operation: "append"` do not add
 
 All client tests use `httpx.MockTransport`. Each REST API method gets its own mock handler matching the method + path pattern. For multi-vault tests, create separate mock transports per vault.
 
-**A mock that returns `200` for everything is worse than no test.** The patch handlers used to do exactly that, asserting nothing about required headers — so the suite stayed fully green while every live `patch_note` call was failing with `40084`. Where a request has a contract the plugin actually enforces, the mock must enforce it too: `tests/test_client.py::markdown_patch_v2_handler` rejects what the real plugin rejects (missing/invalid version header, a heading `Target` that isn't a JSON array, v1-only headers under v2) and all PATCH success-path tests route through it. `test_contract_handler_rejects_nonconformant_requests` guards the guard, so it can't quietly go permissive. The same goes for preconditions: `tests/plugin_fakes.py::FakeVaultNote` keeps real note state, computes content-derived tags, serves only a weak tag on note+json, and refuses stale / malformed / weak `If-Match` exactly as the plugin does. `TestPreconditionFake` guards it.
+**A mock that returns `200` for everything is worse than no test.** The patch handlers used to do exactly that, asserting nothing about required headers — so the suite stayed fully green while every live `patch_note` call was failing with `40084`. Where a request has a contract the plugin actually enforces, the mock must enforce it too: `tests/test_client.py::markdown_patch_v2_handler` rejects what the real plugin rejects (missing/invalid version header, a heading `Target` that isn't a JSON array, v1-only headers under v2) and all PATCH success-path tests route through it. `test_contract_handler_rejects_nonconformant_requests` guards the guard, so it can't quietly go permissive. The same goes for preconditions: `tests/plugin_fakes.py::FakeVaultNote` keeps real note state, computes content-derived tags, serves only a weak tag on note+json, and refuses stale / malformed / weak `If-Match` exactly as the plugin does. `TestPreconditionFake` guards it. Likewise `FakeFrontmatterNote` holds real frontmatter and applies the plugin's merge, not-mergeable and missing-key rules, so a list sent as a JSON *string* lands as a string there too. `TestFrontmatterFake` guards it.
 
 ## Manual Smoke Checklist
 
@@ -173,6 +190,7 @@ The automated test suite mocks every HTTP exchange. A handful of assumptions are
 3. **`list_vaults`** — confirm vault appears with `status: "online"` and `index` populated from `Index.md` (or `None` if the file isn't there, not unreachable).
 4. **`read_note`** on a note with frontmatter — confirm `content` has the `---` block stripped, `frontmatter` is a parsed dict, `tags` includes both frontmatter and inline `#tag` references, `stat.created` / `stat.modified` are ISO 8601 strings. This exercises the `Accept: application/vnd.olrapi.note+json` header which the test suite can't validate end-to-end.
 5. **`patch_note`** with `target_type="heading"`, `target="Parent::Child"` — confirm the right heading is targeted. This exercises the markdown-patch v2 `Target` round-trip (`::` path → JSON array → percent-encoded → plugin decodes and matches structurally), the single most fragile contract point in the client. Then repeat for `target_type="block-reference"` and `target_type="frontmatter-key"`, each with `append` / `prepend` / `replace` — the version header and target encoding are shared by all nine combinations, so a v2 regression can hide in any of them.
+   **Then structured frontmatter:** `value=["a","b"]` on `tags` → `read_note` shows a real list. Append/prepend a list and an object, checking which side wins on prepend. `value=2` / `value=true` come back as int / bool, while `content="1.0"`, `"true"` and `"null"` still come back as strings. A list-shaped `content` is refused and pointed at `value`. A missing key 404s with the `create_if_missing` hint, and `create_if_missing=True` creates it, even on a note with no frontmatter block.
    **Also re-check the plugin version** (`manifest.json` in the vault's `.obsidian/plugins/obsidian-local-rest-api/`). The docs are written against **5.5.2**; a bump is the single likeliest cause of a sudden patch failure, and the plugin's own error text is the best source for what changed.
 6. **`write_note`** then **`append_note`** then **`delete_note`** — full destructive round-trip against a throwaway file. Confirm `delete_note` actually requires `confirm: true` (Pydantic schema should still accept `confirm: false` and the runtime gate should reject).
    **Then preconditions:** `read_note` → confirm `etag` equals the plugin's own `ETag` from a HEAD and is not `W/`-prefixed. For each of the four write tools: `read_note`, edit the note out of band (raw PUT, or type in Obsidian), then call the tool with the stale `if_match` → it must fail with "Precondition failed" and leave the edit intact. Also `write_note(create_only=True)` against an existing note → "already exists", untouched.
