@@ -4,6 +4,8 @@ import pytest
 from pydantic import TypeAdapter, ValidationError
 
 from obsidian_multivault_mcp.validation_types import (
+    DeleteScope,
+    HeadingSegments,
     ClampedContextLength,
     PatchOperation,
     PatchTargetType,
@@ -163,13 +165,47 @@ class TestClampedContextLength:
 class TestPatchOperation:
     adapter = TypeAdapter(PatchOperation)
 
-    @pytest.mark.parametrize("op", ["append", "prepend", "replace"])
+    @pytest.mark.parametrize("op", ["append", "prepend", "replace", "delete"])
     def test_valid(self, op):
         assert self.adapter.validate_python(op) == op
 
-    def test_invalid_rejected(self):
+    @pytest.mark.parametrize("op", ["insert", "Delete", ""])
+    def test_invalid_rejected(self, op):
         with pytest.raises(ValidationError):
-            self.adapter.validate_python("delete")
+            self.adapter.validate_python(op)
+
+
+class TestDeleteScope:
+    adapter = TypeAdapter(DeleteScope)
+
+    @pytest.mark.parametrize("scope", ["all", "content", "marker"])
+    def test_valid(self, scope):
+        assert self.adapter.validate_python(scope) == scope
+
+    # The plugin's own vocabulary is deliberately not accepted: the tool
+    # speaks "all", and the client owns the mapping to markerAndContent.
+    @pytest.mark.parametrize("scope", ["markerAndContent", "parent", "ALL"])
+    def test_invalid_rejected(self, scope):
+        with pytest.raises(ValidationError):
+            self.adapter.validate_python(scope)
+
+
+class TestHeadingSegments:
+    adapter = TypeAdapter(HeadingSegments)
+
+    @pytest.mark.parametrize("value", [["A"], ["Report", "Q1::Q2"], [" padded "]])
+    def test_valid_passes_through_unchanged(self, value):
+        assert self.adapter.validate_python(value) == value
+
+    # [] addresses the document root, where a delete wipes the body.
+    @pytest.mark.parametrize("value", [[], ["A", ""], [""]])
+    def test_empty_list_or_segment_rejected(self, value):
+        with pytest.raises(ValidationError):
+            self.adapter.validate_python(value)
+
+    def test_non_string_segment_rejected(self):
+        with pytest.raises(ValidationError):
+            self.adapter.validate_python(["A", 1])
 
 
 class TestPatchTargetType:

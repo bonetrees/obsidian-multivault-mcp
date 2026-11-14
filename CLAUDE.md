@@ -106,6 +106,8 @@ Transport errors are caught in `_request()` and mapped to `ToolError`.
 | HTTP 400 + `errorCode: 40082/40083/40084` | `_raise_for_status` | `ToolError`: "PATCH protocol mismatch" — client/plugin disagree on the markdown-patch format. Names the version header we send; check the plugin version |
 | HTTP 409 (patch) | `_raise_for_status` (generic) | `ToolError`: content preexists / frontmatter key collision |
 | HTTP 404 on a frontmatter PATCH | `_raise_for_status` + `FRONTMATTER_TARGET_HINT` | `NotFound`: the *key* is absent (plugin: "could not resolve frontmatter target"); hint names `create_if_missing=True` |
+| HTTP 400 + `errorCode: 40081` | `_raise_for_status` (generic) | `ToolError`: invalid patch instruction, e.g. a payload on a delete, or an operation × scope × target-type combination the plugin doesn't support. `_check_patch_args` refuses the ones we know of before sending |
+| HTTP 400 + `errorCode: 40059` | `_raise_for_status` (generic) | `ToolError`: invalid `Target-Scope` value. Unreachable through the tool, which only sends values from `_DELETE_SCOPE_WIRE` |
 | HTTP 400 + `errorCode: 40080` "not mergeable" | `_raise_for_status` + `FRONTMATTER_TARGET_HINT` | `ToolError`: append/prepend across mismatched types; hint says to use `replace` |
 | HTTP 412 / `errorCode: 41200` | `_raise_for_status` | `PreconditionFailed` (subclass of `ToolError`): note changed since the caller's `if_match` version (or exists, for `create_only`); nothing was written |
 | HTTP 400 + `errorCode: 40024` | `_raise_for_status` | `ToolError`: "Malformed etag" — deliberately *not* `PreconditionFailed`, since re-reading and retrying can't fix a mangled tag |
@@ -126,11 +128,32 @@ Wire contract for header targeting, all enforced in `client.py`:
 - **Body carriers:** a `text/*` body becomes the instruction's `content`; an `application/json` body becomes its `value`. The frontmatter branch's existing `application/json` is the correct carrier, so bodies needed no change. The plugin parses with `express.json({strict: false})`, so a bare JSON scalar (`"published"`) is accepted.
 - **Success returns 200 with the patched document as the body**, an `ETag`, and any advisory notices as percent-encoded JSON in a `Markdown-Patch-Warnings` header. `patch_note()` returns those warnings as `list[dict]` (`{code, message}`); the tool surfaces them under `warnings`. They are advisory — the write already happened — so an unparseable header is logged and dropped, never promoted to a failure.
 
-The **tool API is unchanged**: callers still pass the full heading path from the document root with `::` (`"Report::Findings::Critical"`, not `"Critical"`), and the split to a JSON array happens inside the client. Appended content still has no automatic newlines — prepend `\n` for append operations.
+The **tool API is unchanged**: callers still pass the full heading path from the document root with `::` (`"Report::Findings::Critical"`, not `"Critical"`), and the split to a JSON array happens inside the client. A heading `target` may also be a **list** of heading texts (`["Report", "Q1::Q2"]`), sent as the JSON array verbatim. That's the only way to address a heading whose own text contains `::`. Appended content still has no automatic newlines — prepend `\n` for append operations.
 
 Under v2 an unmatched heading comes back as **404** (`TargetNotFoundError`), not `40080`. Since a 404 on PATCH otherwise reads identically to "the note doesn't exist", `patch_note` passes `HEADING_TARGET_HINT` into `_raise_for_status(..., hint=...)` for heading targets only. Don't hardcode that hint in `_raise_for_status` again — it used to fire on every `40080`, including frontmatter-key patches where the `::` advice is meaningless.
 
-Not yet implemented from v5.x: the v2 `delete` operation and path-element targeting (`/vault/note.md/heading/My%20Heading`).
+### Delete and `Target-Scope`
+
+`patch_note(operation="delete")` sends **no body and no Content-Type**. Any payload on a delete is `40081`, and the plugin only treats a body as absent when it has no bytes and no `Transfer-Encoding`. It sends `Target-Scope` from `delete_scope`, and **only on deletes**, so append/prepend/replace keep their exact wire shape. Read from the 5.5.2 source and verified live:
+
+| `delete_scope` (wire) | heading | block | frontmatter key |
+|---|---|---|---|
+| `"all"` (`markerAndContent`), **tool default** | heading line + body + **all child subheadings** | the whole block + `^id` | key removed. The last key removes the `---` block |
+| `"content"` (`content`), **plugin default** | body + **all child subheadings**; heading line kept | text removed, `^id` kept | key kept, set to `null` |
+| `"marker"` (`marker`) | heading line only; body joins the section above, children promoted a level | `^id` only | invalid (40081), refused client-side |
+
+- The tool's default is `"all"`, not the plugin's `content`, because "delete the key" should remove it rather than leave `key: null` behind. **Both** heading scopes except `marker` take the child subheadings with them.
+- **Root hazard:** a heading `Target` of `[]` addresses the *document root*, so a delete there wipes the body. A `::` string can never split to `[]`, but a list target could. `HeadingSegments` and `_check_patch_args` both refuse an empty list. Keep both.
+- `Create-Target-If-Missing` never applies to delete, so a missing target is always 404.
+- The plugin's own HTTP DELETE on a path-element URL returns 405 advising "PATCH with Operation: replace and an empty body". **That advice is wrong under v2:** replace with no payload is 40081. Use `Operation: delete`.
+
+### Path-element targeting: considered and declined
+
+`/vault/note.md/heading/A/B` targeting was evaluated (Asana follow-up) and **not adopted**. In the 5.5.2 source, header targeting is deprecated for v1 and for GET/PUT/POST, but **PATCH with `Target-Type`/`Target` under an explicit `Markdown-Patch-Version: 2` is documented as non-deprecated**, and the v2 path emits no deprecation signal. Its other selling point, addressing headings that contain `::`, is covered by list targets. Things to know if this is revisited after a plugin release that deprecates PATCH header targeting:
+- It's a migration, not an addition: a URL target together with `Target-Type`/`Target` headers is `42200`.
+- A path-element PATCH with **no** version header is silently treated as v2.
+- `/vault/note.md/heading` with no segments is the document root.
+- Extra segments after a block id or frontmatter key are silently ignored.
 
 ### Structured frontmatter: `content` vs `value`
 
@@ -191,6 +214,7 @@ The automated test suite mocks every HTTP exchange. A handful of assumptions are
 4. **`read_note`** on a note with frontmatter — confirm `content` has the `---` block stripped, `frontmatter` is a parsed dict, `tags` includes both frontmatter and inline `#tag` references, `stat.created` / `stat.modified` are ISO 8601 strings. This exercises the `Accept: application/vnd.olrapi.note+json` header which the test suite can't validate end-to-end.
 5. **`patch_note`** with `target_type="heading"`, `target="Parent::Child"` — confirm the right heading is targeted. This exercises the markdown-patch v2 `Target` round-trip (`::` path → JSON array → percent-encoded → plugin decodes and matches structurally), the single most fragile contract point in the client. Then repeat for `target_type="block-reference"` and `target_type="frontmatter-key"`, each with `append` / `prepend` / `replace` — the version header and target encoding are shared by all nine combinations, so a v2 regression can hide in any of them.
    **Then structured frontmatter:** `value=["a","b"]` on `tags` → `read_note` shows a real list. Append/prepend a list and an object, checking which side wins on prepend. `value=2` / `value=true` come back as int / bool, while `content="1.0"`, `"true"` and `"null"` still come back as strings. A list-shaped `content` is refused and pointed at `value`. A missing key 404s with the `create_if_missing` hint, and `create_if_missing=True` creates it, even on a note with no frontmatter block.
+   **Then delete:** run each `delete_scope` on a heading with a child (the sibling must survive `"all"`), on a block, and on a frontmatter key. Deleting the last frontmatter key should remove the `---` block, and `marker` on frontmatter should be refused. A heading whose text contains `::` should be unreachable as a string but reachable as a list target, for both append and delete.
    **Also re-check the plugin version** (`manifest.json` in the vault's `.obsidian/plugins/obsidian-local-rest-api/`). The docs are written against **5.5.2**; a bump is the single likeliest cause of a sudden patch failure, and the plugin's own error text is the best source for what changed.
 6. **`write_note`** then **`append_note`** then **`delete_note`** — full destructive round-trip against a throwaway file. Confirm `delete_note` actually requires `confirm: true` (Pydantic schema should still accept `confirm: false` and the runtime gate should reject).
    **Then preconditions:** `read_note` → confirm `etag` equals the plugin's own `ETag` from a HEAD and is not `W/`-prefixed. For each of the four write tools: `read_note`, edit the note out of band (raw PUT, or type in Obsidian), then call the tool with the stale `if_match` → it must fail with "Precondition failed" and leave the edit intact. Also `write_note(create_only=True)` against an existing note → "already exists", untouched.

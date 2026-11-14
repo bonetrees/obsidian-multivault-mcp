@@ -5,8 +5,10 @@ from pydantic import StrictBool
 
 from ..server import get_client, mcp
 from ..validation_types import (
+    DeleteScope,
     ETag,
     FrontmatterValue,
+    HeadingSegments,
     PatchOperation,
     PatchTargetType,
     VaultFilePath,
@@ -15,7 +17,9 @@ from ..validation_types import (
 
 
 @mcp.tool(
-    annotations={"readOnlyHint": False, "openWorldHint": False},
+    # destructiveHint: operation="delete" removes content outright (and
+    # replace overwrites it), so this is no longer a purely additive tool.
+    annotations={"readOnlyHint": False, "openWorldHint": False, "destructiveHint": True},
     tags={"obsidian", "write"},
 )
 async def patch_note(
@@ -24,11 +28,12 @@ async def patch_note(
     path: VaultFilePath,
     operation: PatchOperation,
     target_type: PatchTargetType,
-    target: str,
+    target: str | HeadingSegments,
     content: str | None = None,
     if_match: ETag | None = None,
     value: FrontmatterValue | None = None,
     create_if_missing: StrictBool = False,
+    delete_scope: DeleteScope | None = None,
 ) -> dict:
     """Surgically edit a note by targeting a specific section.
 
@@ -42,7 +47,9 @@ async def patch_note(
       as `# Report` → `## Findings` → `### Critical`, the target is
       `"Report::Findings::Critical"`. A bare child heading like
       `"Critical"` will fail with `invalid-target`. Always read the note
-      first if you are unsure of the structure.
+      first if you are unsure of the structure. If a heading's own text
+      contains `::`, pass the path as a **list** of heading texts instead,
+      e.g. `["Report", "Q1::Q2 summary"]`.
     - `target_type="block-reference"` — `target` is the block ID (the
       `^block-id` at the end of a block, without the `^`).
     - `target_type="frontmatter-key"` — `target` is the YAML key name
@@ -62,7 +69,8 @@ async def patch_note(
       `value` and `create_if_missing` are for frontmatter-key targets
       only.
 
-    **Operations** (`content` is required for heading and block targets):
+    **Operations** (`append`/`prepend`/`replace` need `content`, or `value`
+    for frontmatter; `delete` takes neither):
 
     - `append` — add content after the targeted section. **Include a
       leading `\\n` in `content`** — the API does not add newlines
@@ -74,6 +82,20 @@ async def patch_note(
       (everything down to the next same-or-higher-level heading). To edit
       only a parent's intro text without touching children, target the
       deepest specific heading instead.
+    - `delete` — remove the target. How much goes is set by `delete_scope`:
+      - `"all"` (default): the whole target. A heading goes **together
+        with its body and every child subheading** beneath it; a block
+        goes with its `^id`; a frontmatter key is removed (removing the
+        last key removes the frontmatter block).
+      - `"content"`: empty it but keep the anchor. The heading line stays
+        (its body **and child subheadings** are still removed); the
+        block's `^id` stays; a frontmatter key stays, set to null.
+      - `"marker"`: remove only the anchor. The heading line goes and its
+        body joins the section above, and its child subheadings may move
+        up a level (e.g. `###` becomes `##`). For a block, only its `^id`
+        goes. Not valid for frontmatter.
+      Read the note first and pass its `etag` as `if_match`, so you
+      delete what you looked at rather than whatever is there now.
 
     **Frontmatter merge rules** (`append`/`prepend` on a frontmatter
     key): two lists are concatenated (duplicates kept); two objects are
@@ -107,6 +129,7 @@ async def patch_note(
         if_match=if_match,
         value=value,
         create_if_missing=create_if_missing,
+        delete_scope=delete_scope,
     )
     return {
         "vault": vault,
