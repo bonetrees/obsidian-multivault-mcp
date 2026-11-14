@@ -78,6 +78,19 @@ def validate_etag(value: object) -> str:
     return tag
 
 
+def validate_heading_segments(value: list[str]) -> list[str]:
+    """Heading path as a list of heading texts, outermost first.
+
+    Must name at least one heading: an empty list addresses the document
+    root, where a delete would wipe the whole body.
+    """
+    if not value:
+        raise ValueError("heading target list must name at least one heading")
+    if any(not segment for segment in value):
+        raise ValueError("heading target list must not contain empty heading texts")
+    return value
+
+
 def _reject_non_int_context_length(value: object) -> int:
     """Pydantic BeforeValidator: reject non-int (incl. bool) before coercion.
 
@@ -109,7 +122,9 @@ ETag = Annotated[str, BeforeValidator(validate_etag)]
 # smart-mode union matches exact types first, so "1.0" stays a str and
 # true stays a bool.
 FrontmatterValue = list[JsonValue] | dict[str, JsonValue] | str | bool | int | float
-PatchOperation = Literal["append", "prepend", "replace"]
+PatchOperation = Literal["append", "prepend", "replace", "delete"]
+DeleteScope = Literal["all", "content", "marker"]
+HeadingSegments = Annotated[list[str], AfterValidator(validate_heading_segments)]
 PatchTargetType = Literal["heading", "block-reference", "frontmatter-key"]
 SearchType = Literal["text", "jsonlogic", "dataview"]
 ClampedContextLength = Annotated[

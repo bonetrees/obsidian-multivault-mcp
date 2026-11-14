@@ -152,7 +152,10 @@ class FakeFrontmatterNote:
       existing keys win on prepend) or two strings. Any other pairing is
       400 / 40080 "not mergeable".
     - A missing key is 404 for every operation unless
-      Create-Target-If-Missing: true, which sets it to the value.
+      Create-Target-If-Missing: true, which sets it to the value. Delete is
+      never creatable: a missing key is 404 regardless.
+    - delete carries no body. Target-Scope content (the plugin default) sets
+      the key to null; markerAndContent removes it; marker is 40081.
 
     Route PATCHes through markdown_patch_v2_handler so the v2 header contract
     is enforced too; this fake only models the frontmatter itself.
@@ -187,11 +190,13 @@ class FakeFrontmatterNote:
             )
         if request.method != "PATCH" or request.headers.get("target-type") != "frontmatter":
             return httpx.Response(405, json={"errorCode": 40500, "message": "Not modelled"})
+        key = urllib.parse.unquote(request.headers["target"])
+        if request.headers["operation"] == "delete":
+            return self._delete(request, key)
         if request.headers.get("content-type") != "application/json":
             return httpx.Response(
                 400, json={"errorCode": 40000, "message": "Expected an application/json value"}
             )
-        key = urllib.parse.unquote(request.headers["target"])
         new = json.loads(request.content)
         operation = request.headers["operation"]
         if key not in self.frontmatter:
@@ -219,4 +224,25 @@ class FakeFrontmatterNote:
                     },
                 )
             self.frontmatter[key] = merged
+        return httpx.Response(200, text="patched")
+
+    def _delete(self, request: httpx.Request, key: str) -> httpx.Response:
+        scope = request.headers.get("target-scope", "content")
+        if request.content or scope not in ("content", "markerAndContent"):
+            return httpx.Response(
+                400,
+                json={"errorCode": 40081, "message": f"delete @ {scope} is not valid here"},
+            )
+        if key not in self.frontmatter:
+            return httpx.Response(
+                404,
+                json={
+                    "errorCode": 40400,
+                    "message": f'Not Found\ncould not resolve frontmatter target "{key}"',
+                },
+            )
+        if scope == "content":
+            self.frontmatter[key] = None
+        else:
+            del self.frontmatter[key]
         return httpx.Response(200, text="patched")

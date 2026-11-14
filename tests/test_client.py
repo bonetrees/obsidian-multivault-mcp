@@ -326,11 +326,50 @@ def markdown_patch_v2_handler(response_factory=None):
                             "percent-encoded JSON: an array of heading texts.",
                         },
                     )
+        scope_error = _v2_scope_error(request)
+        if scope_error is not None:
+            return scope_error
         if response_factory is not None:
             return response_factory(request)
         return httpx.Response(200)
 
     return handler
+
+
+# Valid delete scopes per wire target type (the plugin's VALID_CELLS table,
+# 5.5.2). Frontmatter has no marker to delete on its own.
+_V2_DELETE_SCOPES = {
+    "heading": {"content", "marker", "markerAndContent"},
+    "block": {"content", "marker", "markerAndContent"},
+    "frontmatter": {"content", "markerAndContent"},
+}
+
+
+def _v2_scope_error(request):
+    """The plugin's Target-Scope and delete-payload rules, or None if conformant."""
+    scope = request.headers.get("target-scope")
+    if scope is not None and scope not in ("content", "marker", "markerAndContent", "parent"):
+        return httpx.Response(
+            400, json={"errorCode": 40059, "message": "The target scope you specified was invalid."}
+        )
+    if request.headers.get("operation") != "delete":
+        return None
+    # Only a body with no bytes counts as absent; anything else is a payload.
+    if request.content:
+        return httpx.Response(
+            400, json={"errorCode": 40081, "message": "a delete carries no payload"}
+        )
+    target_type = request.headers.get("target-type")
+    if (scope or "content") not in _V2_DELETE_SCOPES.get(target_type, set()):
+        return httpx.Response(
+            400,
+            json={
+                "errorCode": 40081,
+                "message": f"delete @ {scope} is not a valid operation for a "
+                f"{target_type} target",
+            },
+        )
+    return None
 
 
 class TestPatchNote:
@@ -472,6 +511,71 @@ class TestPatchNote:
         )
         assert response.status_code == 400
         assert json.loads(response.content)["errorCode"] == expected_code
+
+    @pytest.mark.parametrize(
+        ("headers", "body", "expected_code"),
+        [
+            # A delete carries no payload, not even an empty-looking one.
+            (
+                {"Operation": "delete", "Target-Type": "heading", "Target": "%5B%22A%22%5D"},
+                b"x",
+                40081,
+            ),
+            ({"Operation": "delete", "Target-Type": "frontmatter", "Target": "k"}, b'""', 40081),
+            # Target-Scope outside the plugin's vocabulary.
+            (
+                {
+                    "Operation": "delete",
+                    "Target-Type": "block",
+                    "Target": "b1",
+                    "Target-Scope": "all",
+                },
+                b"",
+                40059,
+            ),
+            # A valid scope that frontmatter doesn't support for delete.
+            (
+                {
+                    "Operation": "delete",
+                    "Target-Type": "frontmatter",
+                    "Target": "k",
+                    "Target-Scope": "marker",
+                },
+                b"",
+                40081,
+            ),
+        ],
+    )
+    def test_contract_handler_rejects_nonconformant_deletes(self, headers, body, expected_code):
+        handler = markdown_patch_v2_handler()
+        response = handler(
+            httpx.Request(
+                "PATCH",
+                "https://127.0.0.1:27124/vault/doc.md",
+                headers={"Markdown-Patch-Version": "2", **headers},
+                content=body,
+            )
+        )
+        assert response.status_code == 400
+        assert json.loads(response.content)["errorCode"] == expected_code
+
+    @pytest.mark.parametrize("scope", ["content", "marker", "markerAndContent"])
+    def test_contract_handler_accepts_conformant_delete(self, scope):
+        handler = markdown_patch_v2_handler()
+        response = handler(
+            httpx.Request(
+                "PATCH",
+                "https://127.0.0.1:27124/vault/doc.md",
+                headers={
+                    "Markdown-Patch-Version": "2",
+                    "Operation": "delete",
+                    "Target-Type": "block",
+                    "Target": "b1",
+                    "Target-Scope": scope,
+                },
+            )
+        )
+        assert response.status_code == 200
 
     def test_contract_handler_accepts_the_conformant_request(self):
         # The positive control for the parametrized rejections above.
@@ -1143,6 +1247,226 @@ class TestStructuredFrontmatter:
         assert "scalar-only" in msg
         assert "pass it as 'value'" in msg
         assert note.requests == []
+
+
+class TestFrontmatterFakeDelete:
+    """Guard the guard for FakeFrontmatterNote's delete semantics."""
+
+    @staticmethod
+    def _delete(note, key, scope=None, body=b""):
+        headers = {"Operation": "delete", "Target-Type": "frontmatter", "Target": key}
+        if scope:
+            headers["Target-Scope"] = scope
+        with httpx.Client(transport=httpx.MockTransport(note.handler)) as http:
+            return http.patch("http://x/vault/doc.md", content=body, headers=headers)
+
+    def test_default_scope_sets_null_rather_than_removing(self):
+        # The plugin default this client deliberately does NOT rely on.
+        note = FakeFrontmatterNote("doc.md", {"k": "v"})
+        assert self._delete(note, "k").status_code == 200
+        assert note.frontmatter == {"k": None}
+
+    def test_marker_and_content_removes_the_key(self):
+        note = FakeFrontmatterNote("doc.md", {"k": "v", "other": 1})
+        assert self._delete(note, "k", "markerAndContent").status_code == 200
+        assert note.frontmatter == {"other": 1}
+
+    @pytest.mark.parametrize(("scope", "body"), [("marker", b""), ("markerAndContent", b"x")])
+    def test_invalid_delete_is_40081(self, scope, body):
+        note = FakeFrontmatterNote("doc.md", {"k": "v"})
+        response = self._delete(note, "k", scope, body)
+        assert response.json()["errorCode"] == 40081
+        assert note.frontmatter == {"k": "v"}
+
+    def test_missing_key_is_404_even_with_create(self):
+        note = FakeFrontmatterNote("doc.md")
+        with httpx.Client(transport=httpx.MockTransport(note.handler)) as http:
+            response = http.patch(
+                "http://x/vault/doc.md",
+                headers={
+                    "Operation": "delete",
+                    "Target-Type": "frontmatter",
+                    "Target": "k",
+                    "Target-Scope": "markerAndContent",
+                    "Create-Target-If-Missing": "true",
+                },
+            )
+        assert response.status_code == 404
+
+
+class TestPatchDelete:
+    @staticmethod
+    def _recording_client(seen):
+        def record(request):
+            seen.append(request)
+            return httpx.Response(200, headers={"ETag": '"after"'})
+
+        return make_client(markdown_patch_v2_handler(record))
+
+    @pytest.mark.parametrize("target_type", ["heading", "block-reference", "frontmatter-key"])
+    async def test_delete_sends_no_body_and_no_content_type(self, target_type):
+        seen = []
+        async with self._recording_client(seen) as client:
+            await client.patch_note(
+                "doc.md", operation="delete", target_type=target_type, target="X"
+            )
+        request = seen[-1]
+        assert request.content == b""
+        assert "content-type" not in request.headers
+        assert "transfer-encoding" not in request.headers
+
+    @pytest.mark.parametrize(
+        ("scope", "wire"),
+        [(None, "markerAndContent"), ("all", "markerAndContent"), ("content", "content")],
+    )
+    async def test_scope_mapping_defaults_to_whole_target(self, scope, wire):
+        seen = []
+        async with self._recording_client(seen) as client:
+            await client.patch_note(
+                "doc.md",
+                operation="delete",
+                target_type="heading",
+                target="A::B",
+                delete_scope=scope,
+            )
+        assert seen[-1].headers["target-scope"] == wire
+
+    async def test_marker_scope_on_heading(self):
+        seen = []
+        async with self._recording_client(seen) as client:
+            await client.patch_note(
+                "doc.md",
+                operation="delete",
+                target_type="heading",
+                target="A",
+                delete_scope="marker",
+            )
+        assert seen[-1].headers["target-scope"] == "marker"
+
+    @pytest.mark.parametrize("operation", ["append", "prepend", "replace"])
+    async def test_no_target_scope_on_other_operations(self, operation):
+        # Non-delete requests must keep exactly their pre-delete wire shape.
+        seen = []
+        async with self._recording_client(seen) as client:
+            await client.patch_note(
+                "doc.md", operation=operation, target_type="heading", target="A", content="x"
+            )
+        assert "target-scope" not in seen[-1].headers
+
+    @pytest.mark.parametrize(
+        ("kwargs", "fragment"),
+        [
+            ({"target_type": "heading", "content": "x"}, "delete takes no"),
+            ({"target_type": "frontmatter-key", "value": ["a"]}, "delete takes no"),
+            ({"target_type": "frontmatter-key", "create_if_missing": True}, "delete takes no"),
+            (
+                {"target_type": "frontmatter-key", "delete_scope": "marker"},
+                "doesn't apply to frontmatter",
+            ),
+        ],
+    )
+    async def test_invalid_delete_rejected_before_request(self, kwargs, fragment):
+        seen = []
+        async with self._recording_client(seen) as client:
+            with pytest.raises(ToolError) as exc_info:
+                await client.patch_note("doc.md", operation="delete", target="k", **kwargs)
+        assert fragment in str(exc_info.value)
+        assert not seen
+
+    async def test_delete_scope_rejected_on_other_operations(self):
+        seen = []
+        async with self._recording_client(seen) as client:
+            with pytest.raises(ToolError) as exc_info:
+                await client.patch_note(
+                    "doc.md",
+                    operation="replace",
+                    target_type="heading",
+                    target="A",
+                    content="x",
+                    delete_scope="all",
+                )
+        assert "only to operation='delete'" in str(exc_info.value)
+        assert not seen
+
+    @pytest.mark.parametrize(
+        ("scope", "expected"), [(None, {"other": 1}), ("content", {"k": None, "other": 1})]
+    )
+    async def test_frontmatter_delete_end_to_end(self, scope, expected):
+        note = FakeFrontmatterNote("doc.md", {"k": "v", "other": 1})
+        async with make_client(markdown_patch_v2_handler(note.handler)) as client:
+            await client.patch_note(
+                "doc.md",
+                operation="delete",
+                target_type="frontmatter-key",
+                target="k",
+                delete_scope=scope,
+            )
+        assert note.frontmatter == expected
+
+    async def test_delete_with_if_match(self):
+        note = FakeVaultNote("doc.md", "# A\n")
+        async with make_client(note.handler) as client:
+            _body, etag = await client.read_note("doc.md")
+            note.content = "# A\n\nuser edit\n"
+            with pytest.raises(PreconditionFailed):
+                await client.patch_note(
+                    "doc.md", operation="delete", target_type="heading", target="A", if_match=etag
+                )
+        assert note.content == "# A\n\nuser edit\n"
+
+
+class TestListHeadingTargets:
+    async def test_list_sent_verbatim_without_splitting(self):
+        seen = []
+
+        def record(request):
+            seen.append(request)
+            return httpx.Response(200)
+
+        async with make_client(markdown_patch_v2_handler(record)) as client:
+            await client.patch_note(
+                "doc.md",
+                operation="append",
+                target_type="heading",
+                target=["Report", "Q1::Q2 summary"],
+                content="x",
+            )
+        target = urllib.parse.unquote(seen[-1].headers["target"])
+        assert json.loads(target) == ["Report", "Q1::Q2 summary"]
+
+    async def test_string_form_still_splits(self):
+        # Unchanged behaviour: the same text as a string is two headings.
+        seen = []
+
+        def record(request):
+            seen.append(request)
+            return httpx.Response(200)
+
+        async with make_client(markdown_patch_v2_handler(record)) as client:
+            await client.patch_note(
+                "doc.md", operation="append", target_type="heading", target="Q1::Q2", content="x"
+            )
+        assert json.loads(urllib.parse.unquote(seen[-1].headers["target"])) == ["Q1", "Q2"]
+
+    @pytest.mark.parametrize(
+        ("target_type", "target"),
+        [("heading", []), ("block-reference", ["b1"]), ("frontmatter-key", ["k"])],
+    )
+    async def test_list_rejected_when_empty_or_not_heading(self, target_type, target):
+        # [] would address the document root — a delete there wipes the body.
+        calls = []
+
+        def handler(request):
+            calls.append(request)
+            return httpx.Response(200)
+
+        async with make_client(handler) as client:
+            with pytest.raises(ToolError) as exc_info:
+                await client.patch_note(
+                    "doc.md", operation="delete", target_type=target_type, target=target
+                )
+        assert "list target is only for heading targets" in str(exc_info.value)
+        assert not calls
 
 
 class TestDeleteNote:

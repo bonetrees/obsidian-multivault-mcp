@@ -518,8 +518,16 @@ class ObsidianVaultClient:
     # frontmatter block at all, which it creates).
     CREATE_TARGET_HEADER = "Create-Target-If-Missing"
 
+    # Tool-facing delete scope → v2 Target-Scope. Sent for deletes only, so
+    # every other operation keeps its exact pre-delete wire shape. "all" is
+    # the tool default because the plugin's own default (content) is the
+    # surprising one: it leaves `key: null` behind on frontmatter and, on a
+    # heading, keeps the heading line while deleting its body AND children.
+    TARGET_SCOPE_HEADER = "Target-Scope"
+    _DELETE_SCOPE_WIRE = {"all": "markerAndContent", "content": "content", "marker": "marker"}
+
     @classmethod
-    def _encode_patch_target(cls, wire_target_type: str, target: str) -> str:
+    def _encode_patch_target(cls, wire_target_type: str, target: str | list[str]) -> str:
         """Percent-encode the Target header for one markdown-patch v2 request.
 
         Tool-facing heading paths stay delimiter-joined ('Report::Findings'),
@@ -528,9 +536,15 @@ class ObsidianVaultClient:
         has to guess where one heading name ends and the next begins. The
         delimiter is therefore a detail of this client's tool API rather than a
         wire concern. It is still a real limit, just a self-imposed one now: a
-        heading whose own text contains '::' cannot be addressed, because the
-        split here can't tell it apart from a path separator. The wire format
-        could express it; the tool API can't.
+        heading whose own text contains '::' can't be addressed as a string,
+        because the split here can't tell it apart from a path separator. So
+        heading targets may also be a list of heading texts, which is sent as
+        the JSON array verbatim with no splitting.
+
+        A list must never be empty: `[]` addresses the document *root*, where
+        a delete wipes the entire body. The tool layer's HeadingSegments type
+        already refuses it; _check_patch_args refuses it again so no future
+        caller of this client can reach that by accident.
 
         Segments are deliberately NOT trimmed. v1 had an opt-in
         Trim-Target-Whitespace header that this client never sent, and sending
@@ -541,7 +555,10 @@ class ObsidianVaultClient:
         """
         if wire_target_type != "heading":
             return urllib.parse.quote(target, safe="")
-        segments = target.split(cls.HEADING_PATH_DELIMITER)
+        if isinstance(target, list):
+            segments = target
+        else:
+            segments = target.split(cls.HEADING_PATH_DELIMITER)
         # Compact separators keep the header short; the plugin JSON.parses it.
         return urllib.parse.quote(json.dumps(segments, separators=(",", ":")), safe="")
 
@@ -577,13 +594,35 @@ class ObsidianVaultClient:
 
     def _patch_body(
         self,
+        headers: dict[str, str],
         wire_target_type: str,
         location: str,
-        target: str,
+        target: str | list[str],
+        content: str | None,
+        value: Any,
+    ) -> bytes | None:
+        """Return the body for one PATCH and set its Content-Type in `headers`.
+
+        Enforces Guard B. Returns None, leaving Content-Type unset, for a
+        delete: v2 treats any payload on a delete as an error (40081), and
+        only a body with no bytes counts as absent, so no body and no
+        Content-Type at all is the one unambiguous shape.
+        """
+        if content is None and value is None:
+            return None
+        content_type, body = self._patch_payload(wire_target_type, location, target, content, value)
+        headers["Content-Type"] = content_type
+        return body
+
+    def _patch_payload(
+        self,
+        wire_target_type: str,
+        location: str,
+        target: str | list[str],
         content: str | None,
         value: Any,
     ) -> tuple[str, bytes]:
-        """Return (Content-Type, body) for one PATCH, enforcing Guard B."""
+        """(Content-Type, body) for a PATCH that carries a payload."""
         # Frontmatter PATCH bodies are interpreted as JSON by the plugin, which
         # enables intelligent merging of structured values. A scalar string
         # round-trips correctly through json.dumps — e.g. json.dumps("done")
@@ -625,38 +664,85 @@ class ObsidianVaultClient:
             return "application/json", json.dumps(content).encode("utf-8")
         return "text/markdown", content.encode("utf-8")
 
+    def _check_patch_args(
+        self,
+        location: str,
+        operation: str,
+        target_type: str,
+        target: str | list[str],
+        content: str | None,
+        value: Any,
+        create_if_missing: bool,
+        delete_scope: str | None,
+    ) -> None:
+        """Refuse argument combinations the plugin would reject or misread.
+
+        Everything here fails before any request is sent, with a message that
+        says what to pass instead.
+        """
+        wire_target_type = self._TARGET_TYPE_WIRE.get(target_type, target_type)
+        prefix = f"patch_note for vault '{self.name}'{location}:"
+        if isinstance(target, list) and (wire_target_type != "heading" or not target):
+            raise ToolError(
+                f"{prefix} a list target is only for heading targets, and must name at "
+                "least one heading (an empty list would address the whole document)."
+            )
+        if operation == "delete":
+            if content is not None or value is not None or create_if_missing:
+                raise ToolError(
+                    f"{prefix} delete takes no 'content', 'value' or create_if_missing."
+                )
+            if wire_target_type == "frontmatter" and delete_scope == "marker":
+                raise ToolError(
+                    f"{prefix} delete_scope='marker' doesn't apply to frontmatter; use "
+                    "'all' to remove the key or 'content' to set it to null."
+                )
+            return
+        if delete_scope is not None:
+            raise ToolError(f"{prefix} delete_scope applies only to operation='delete'.")
+        if (content is None) == (value is None):
+            raise ToolError(f"{prefix} pass exactly one of 'content' or 'value'.")
+        if wire_target_type != "frontmatter" and (value is not None or create_if_missing):
+            raise ToolError(
+                f"{prefix} 'value' and create_if_missing apply only to frontmatter-key "
+                f"targets; use 'content' for {target_type} targets."
+            )
+
     async def patch_note(
         self,
         path: str,
         operation: str,
         target_type: str,
-        target: str,
+        target: str | list[str],
         content: str | None = None,
         if_match: str | None = None,
         value: Any = None,
         create_if_missing: bool = False,
+        delete_scope: str | None = None,
     ) -> tuple[list[dict], str | None]:
         """Apply one surgical edit; returns (advisory warnings, new etag).
 
-        Exactly one of ``content`` (text) or ``value`` (any JSON value except
-        null, frontmatter targets only) must be given. ``value`` is how a
-        caller says "this is structured": it is serialised as-is, so a list
-        lands as a YAML list. ``content`` is never parsed into structure —
-        see Guard B below for why that direction is unsafe.
+        For append/prepend/replace, exactly one of ``content`` (text) or
+        ``value`` (any JSON value except null, frontmatter targets only) must
+        be given. ``value`` is how a caller says "this is structured": it is
+        serialised as-is, so a list lands as a YAML list. ``content`` is never
+        parsed into structure — see Guard B for why that direction is unsafe.
+
+        ``operation="delete"`` takes neither, and ``delete_scope`` (default
+        "all") picks how much of the target goes — see _DELETE_SCOPE_WIRE.
         """
         wire_target_type = self._TARGET_TYPE_WIRE.get(target_type, target_type)
         location = self._format_location(path)
-        if (content is None) == (value is None):
-            raise ToolError(
-                f"patch_note for vault '{self.name}'{location}: pass exactly one of "
-                "'content' or 'value'."
-            )
-        if wire_target_type != "frontmatter" and (value is not None or create_if_missing):
-            raise ToolError(
-                f"patch_note for vault '{self.name}'{location}: 'value' and "
-                "create_if_missing apply only to frontmatter-key targets; use "
-                f"'content' for {target_type} targets."
-            )
+        self._check_patch_args(
+            location,
+            operation,
+            target_type,
+            target,
+            content,
+            value,
+            create_if_missing,
+            delete_scope,
+        )
         headers = {
             "Operation": operation,
             "Target-Type": wire_target_type,
@@ -671,9 +757,9 @@ class ObsidianVaultClient:
         }
         if create_if_missing:
             headers[self.CREATE_TARGET_HEADER] = "true"
-        headers["Content-Type"], body = self._patch_body(
-            wire_target_type, location, target, content, value
-        )
+        if operation == "delete":
+            headers[self.TARGET_SCOPE_HEADER] = self._DELETE_SCOPE_WIRE[delete_scope or "all"]
+        body = self._patch_body(headers, wire_target_type, location, target, content, value)
         response = await self._request(
             "PATCH",
             f"/vault/{self._encode_path(path)}",
@@ -685,11 +771,15 @@ class ObsidianVaultClient:
         # frontmatter key comes back as 404 rather than 40080, and a 404 on
         # PATCH is otherwise indistinguishable from "the note itself doesn't
         # exist" — so each hint has to cover both readings.
-        hint = {
-            "heading": self.HEADING_TARGET_HINT,
-            "frontmatter": self.FRONTMATTER_TARGET_HINT,
-        }.get(wire_target_type)
-        self._raise_for_status(response, "patch_note", path, hint=hint)
+        self._raise_for_status(
+            response,
+            "patch_note",
+            path,
+            hint={
+                "heading": self.HEADING_TARGET_HINT,
+                "frontmatter": self.FRONTMATTER_TARGET_HINT,
+            }.get(wire_target_type),
+        )
         return self._parse_patch_warnings(response), self._etag(response)
 
     async def delete_note(self, path: str, if_match: str | None = None) -> None:

@@ -446,6 +446,71 @@ class TestPatchNoteStructuredFrontmatter:
         assert "content" not in tool.inputSchema["required"]
 
 
+class TestPatchNoteDelete:
+    """delete and list heading targets, end to end through the MCP boundary."""
+
+    @pytest.fixture
+    def note(self):
+        return FakeFrontmatterNote("doc.md", {"status": "draft", "tags": ["a"]})
+
+    @pytest.fixture
+    def seen(self):
+        return []
+
+    @pytest.fixture
+    def vault_handlers(self, note, seen):
+        def vault(request):
+            seen.append(request)
+            if request.headers.get("target-type") == "heading":
+                return httpx.Response(200)
+            return note.handler(request)
+
+        return {"v": vault}
+
+    @staticmethod
+    def _args(**kwargs):
+        return {"vault": "v", "path": "doc.md", "operation": "delete", **kwargs}
+
+    async def test_frontmatter_delete_removes_the_key_by_default(self, mcp_client, note):
+        data = await _call(
+            mcp_client, "patch_note", self._args(target_type="frontmatter-key", target="status")
+        )
+        assert data["operation"] == "delete"
+        assert note.frontmatter == {"tags": ["a"]}
+
+    async def test_content_scope_keeps_key_as_null(self, mcp_client, note):
+        await _call(
+            mcp_client,
+            "patch_note",
+            self._args(target_type="frontmatter-key", target="status", delete_scope="content"),
+        )
+        assert note.frontmatter["status"] is None
+
+    async def test_list_heading_target_crosses_mcp_intact(self, mcp_client, seen):
+        await _call(
+            mcp_client,
+            "patch_note",
+            self._args(target_type="heading", target=["Report", "Q1::Q2"]),
+        )
+        assert json.loads(urllib.parse.unquote(seen[-1].headers["target"])) == ["Report", "Q1::Q2"]
+        assert seen[-1].headers["target-scope"] == "markerAndContent"
+        assert seen[-1].content == b""
+
+    @pytest.mark.parametrize("target", [[], ["A", ""]])
+    async def test_unusable_list_rejected_before_request(self, mcp_client, seen, target):
+        with pytest.raises(ToolError):
+            await _call(mcp_client, "patch_note", self._args(target_type="heading", target=target))
+        assert seen == []
+
+    async def test_schema_and_annotations(self, mcp_client):
+        tool = next(t for t in await mcp_client.list_tools() if t.name == "patch_note")
+        props = tool.inputSchema["properties"]
+        assert "delete" in json.dumps(props["operation"])
+        assert {"all", "content", "marker"} <= set(json.dumps(props["delete_scope"]).split('"'))
+        assert "array" in json.dumps(props["target"])
+        assert tool.annotations.destructiveHint is True
+
+
 class TestPatchNoteFrontmatter:
     """End-to-end coverage of the v0.2.0 frontmatter fix: the friendly
     `frontmatter-key` enum must reach the plugin as `frontmatter` over JSON,
