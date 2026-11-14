@@ -17,6 +17,8 @@ wouldn't. Behaviour mirrors plugin 5.5.2 as probed live:
 """
 
 import hashlib
+import json
+import urllib.parse
 
 import httpx
 
@@ -135,3 +137,86 @@ class FakeVaultNote:
             self.content = None
             return httpx.Response(204)
         return httpx.Response(405, json={"errorCode": 40500, "message": "Not allowed"})
+
+
+class FakeFrontmatterNote:
+    """Stateful fake of the plugin's v2 frontmatter PATCH semantics.
+
+    Mirrors plugin 5.5.2 as probed live, so a client that sends a list as a
+    JSON *string* (or the wrong carrier) produces the wrong frontmatter here
+    exactly as it would in a vault:
+
+    - The body must be application/json; it is the new value, any JSON type.
+    - replace sets the key. append/prepend merge two lists (concatenated,
+      duplicates kept), two objects (shallow; new keys win on append,
+      existing keys win on prepend) or two strings. Any other pairing is
+      400 / 40080 "not mergeable".
+    - A missing key is 404 for every operation unless
+      Create-Target-If-Missing: true, which sets it to the value.
+
+    Route PATCHes through markdown_patch_v2_handler so the v2 header contract
+    is enforced too; this fake only models the frontmatter itself.
+    """
+
+    def __init__(self, path: str, frontmatter: dict | None = None) -> None:
+        self.url_path = f"/vault/{path}"
+        self.frontmatter: dict = dict(frontmatter or {})
+        self.requests: list[httpx.Request] = []
+
+    @staticmethod
+    def _merge(operation: str, old, new):
+        """Merged value, or None when the plugin would refuse the pair."""
+        if isinstance(old, list) and isinstance(new, list):
+            return old + new if operation == "append" else new + old
+        if isinstance(old, dict) and isinstance(new, dict):
+            return {**old, **new} if operation == "append" else {**new, **old}
+        if isinstance(old, str) and isinstance(new, str):
+            return old + new if operation == "append" else new + old
+        return None
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        if request.url.path != self.url_path:
+            return httpx.Response(404, json={"errorCode": 40400, "message": "Not Found"})
+        if request.method == "HEAD":  # read_note's etag probe; no tag modelled here
+            return httpx.Response(200)
+        if request.method == "GET":
+            return httpx.Response(
+                200,
+                json={"content": "# Body\n", "frontmatter": self.frontmatter, "tags": []},
+            )
+        if request.method != "PATCH" or request.headers.get("target-type") != "frontmatter":
+            return httpx.Response(405, json={"errorCode": 40500, "message": "Not modelled"})
+        if request.headers.get("content-type") != "application/json":
+            return httpx.Response(
+                400, json={"errorCode": 40000, "message": "Expected an application/json value"}
+            )
+        key = urllib.parse.unquote(request.headers["target"])
+        new = json.loads(request.content)
+        operation = request.headers["operation"]
+        if key not in self.frontmatter:
+            if request.headers.get("create-target-if-missing") != "true":
+                return httpx.Response(
+                    404,
+                    json={
+                        "errorCode": 40400,
+                        "message": f'Not Found\ncould not resolve frontmatter target "{key}"',
+                    },
+                )
+            self.frontmatter[key] = new
+        elif operation == "replace":
+            self.frontmatter[key] = new
+        else:
+            merged = self._merge(operation, self.frontmatter[key], new)
+            if merged is None:
+                return httpx.Response(
+                    400,
+                    json={
+                        "errorCode": 40080,
+                        "message": "The patch you provided could not be applied to the "
+                        "target content.\nfrontmatter values are not mergeable (need two "
+                        "lists, two dicts, or two strings)",
+                    },
+                )
+            self.frontmatter[key] = merged
+        return httpx.Response(200, text="patched")

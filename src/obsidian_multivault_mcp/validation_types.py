@@ -8,7 +8,7 @@ like ``123`` would get silently coerced to ``"123"`` and slip past the
 
 from typing import Annotated, Literal
 
-from pydantic import AfterValidator, BeforeValidator
+from pydantic import AfterValidator, BeforeValidator, JsonValue
 
 
 def _require_str(label: str, value: object) -> str:
@@ -103,6 +103,12 @@ VaultName = Annotated[str, BeforeValidator(validate_vault_name)]
 VaultPath = Annotated[str, BeforeValidator(validate_vault_path)]
 VaultFilePath = Annotated[str, BeforeValidator(validate_vault_file_path)]
 ETag = Annotated[str, BeforeValidator(validate_etag)]
+# patch_note's structured frontmatter value: any JSON except null. Spelled
+# out (rather than bare JsonValue, which renders as an empty `{}` schema) so
+# tool discovery shows callers which JSON types are accepted. Pydantic's
+# smart-mode union matches exact types first, so "1.0" stays a str and
+# true stays a bool.
+FrontmatterValue = list[JsonValue] | dict[str, JsonValue] | str | bool | int | float
 PatchOperation = Literal["append", "prepend", "replace"]
 PatchTargetType = Literal["heading", "block-reference", "frontmatter-key"]
 SearchType = Literal["text", "jsonlogic", "dataview"]
