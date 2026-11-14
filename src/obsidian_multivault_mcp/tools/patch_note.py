@@ -4,6 +4,7 @@ from fastmcp import Context
 
 from ..server import get_client, mcp
 from ..validation_types import (
+    ETag,
     PatchOperation,
     PatchTargetType,
     VaultFilePath,
@@ -23,6 +24,7 @@ async def patch_note(
     target_type: PatchTargetType,
     target: str,
     content: str,
+    if_match: ETag | None = None,
 ) -> dict:
     """Surgically edit a note by targeting a specific section.
 
@@ -67,14 +69,23 @@ async def patch_note(
     than Markdown's six levels, which leaves it unaddressable by later
     `heading` patches). Warnings are not failures — a failed patch
     raises instead.
+
+    Pass `if_match` (the `etag` from `read_note`, or from this tool's
+    previous result) to make the write conditional: if the note has
+    changed since that version, nothing is written and the call fails
+    with "Precondition failed". Then read the note again, re-apply your
+    change to the current content, and retry with the new `etag`.
+    Strongly recommended whenever your content was derived from an
+    earlier read. The result's `etag` is the note's new version.
     """
     client = get_client(ctx, vault)
-    warnings = await client.patch_note(
+    warnings, etag = await client.patch_note(
         path=path,
         operation=operation,
         target_type=target_type,
         target=target,
         content=content,
+        if_match=if_match,
     )
     return {
         "vault": vault,
@@ -84,4 +95,5 @@ async def patch_note(
         "target_type": target_type,
         "target": target,
         "warnings": warnings,
+        "etag": etag,
     }

@@ -7,7 +7,8 @@ import httpx
 import pytest
 from fastmcp.exceptions import ToolError
 
-from obsidian_multivault_mcp.client import NotFound, ObsidianVaultClient
+from obsidian_multivault_mcp.client import NotFound, ObsidianVaultClient, PreconditionFailed
+from tests.plugin_fakes import FakeVaultNote, content_etag
 
 
 def make_client(handler, **overrides) -> ObsidianVaultClient:
@@ -82,15 +83,25 @@ class TestReadNote:
             "stat": {"ctime": 1700000000000, "mtime": 1700000001000, "size": 20},
         }
 
+        seen = []
+
         def handler(request):
-            assert request.method == "GET"
             assert request.url.path == "/vault/notes/foo.md"
-            assert request.headers["accept"] == "application/vnd.olrapi.note+json"
+            seen.append((request.method, request.headers["accept"]))
+            if request.method == "HEAD":
+                return httpx.Response(200, headers={"ETag": '"abc123"'})
             return httpx.Response(200, json=body)
 
         async with make_client(handler) as client:
-            result = await client.read_note("notes/foo.md")
+            result, etag = await client.read_note("notes/foo.md")
         assert result == body
+        assert etag == '"abc123"'
+        # HEAD for the file etag strictly before the note+json GET — see
+        # TestPreconditions.test_read_note_etag_is_never_newer_than_content.
+        assert seen == [
+            ("HEAD", "text/markdown"),
+            ("GET", "application/vnd.olrapi.note+json"),
+        ]
 
     async def test_path_url_encoded(self):
         seen = {}
@@ -169,7 +180,7 @@ class TestReadNote:
             return httpx.Response(200, json={"content": "body"})  # no frontmatter/tags/stat
 
         async with make_client(handler) as client:
-            result = await client.read_note("foo.md")
+            result, _etag = await client.read_note("foo.md")
         assert result == {"content": "body"}
 
     @pytest.mark.parametrize("subfield", ["ctime", "mtime", "size"])
@@ -336,7 +347,7 @@ class TestPatchNote:
             return httpx.Response(200)
 
         async with make_client(markdown_patch_v2_handler(record)) as client:
-            warnings = await client.patch_note(
+            warnings, _etag = await client.patch_note(
                 "doc.md",
                 operation="append",
                 target_type="heading",
@@ -524,7 +535,7 @@ class TestPatchNote:
             )
 
         async with make_client(markdown_patch_v2_handler(record)) as client:
-            warnings = await client.patch_note(
+            warnings, _etag = await client.patch_note(
                 "doc.md",
                 operation="append",
                 target_type="heading",
@@ -542,7 +553,7 @@ class TestPatchNote:
             return httpx.Response(200, headers={"Markdown-Patch-Warnings": raw})
 
         async with make_client(markdown_patch_v2_handler(record)) as client:
-            warnings = await client.patch_note(
+            warnings, _etag = await client.patch_note(
                 "doc.md",
                 operation="append",
                 target_type="heading",
@@ -785,6 +796,179 @@ class TestPatchNote:
                 content="draft",
             )
         assert seen["body"] == b'"draft"'
+
+
+def precondition_handler(note: FakeVaultNote):
+    """FakeVaultNote, with PATCH also held to the markdown-patch v2 contract."""
+    patch_contract = markdown_patch_v2_handler(note.handler)
+    return lambda request: (
+        patch_contract(request) if request.method == "PATCH" else note.handler(request)
+    )
+
+
+async def _write(client, op, etag, path="doc.md"):
+    """Run one conditional write by name; returns its result."""
+    if op == "write":
+        return await client.write_note(path, "# Doc\n\nrewritten\n", if_match=etag)
+    if op == "append":
+        return await client.append_note(path, "\nappended", if_match=etag)
+    if op == "patch":
+        return await client.patch_note(
+            path,
+            operation="append",
+            target_type="heading",
+            target="Doc",
+            content="\npatched",
+            if_match=etag,
+        )
+    return await client.delete_note(path, if_match=etag)
+
+
+WRITE_OPS = ["write", "append", "patch", "delete"]
+
+
+class TestPreconditionFake:
+    """Guard the guard: if FakeVaultNote quietly went permissive, every
+    precondition test below would pass against a client that sends nothing."""
+
+    @staticmethod
+    def _send(note, method, **headers):
+        with httpx.Client(transport=httpx.MockTransport(note.handler)) as http:
+            return http.request(method, "http://x/vault/doc.md", content=b"new", headers=headers)
+
+    @pytest.mark.parametrize("method", ["PUT", "POST", "PATCH", "DELETE"])
+    def test_stale_if_match_is_412_and_writes_nothing(self, method):
+        note = FakeVaultNote("doc.md", "original")
+        response = self._send(note, method, **{"If-Match": '"stale"'})
+        assert response.status_code == 412
+        assert response.json()["errorCode"] == 41200
+        assert note.content == "original"
+
+    @pytest.mark.parametrize("header", ["", '"a" "b"', '"a",,"b"'])
+    def test_malformed_precondition_is_40024(self, header):
+        note = FakeVaultNote("doc.md", "original")
+        response = self._send(note, "PUT", **{"If-Match": header})
+        assert (response.status_code, response.json()["errorCode"]) == (400, 40024)
+        assert note.content == "original"
+
+    def test_weak_form_of_current_tag_does_not_match(self):
+        # The plugin compares strongly, as probed live.
+        note = FakeVaultNote("doc.md", "original")
+        response = self._send(note, "PUT", **{"If-Match": "W/" + note.etag})
+        assert response.status_code == 412
+
+    def test_if_none_match_star_refuses_existing_note(self):
+        note = FakeVaultNote("doc.md", "original")
+        assert self._send(note, "PUT", **{"If-None-Match": "*"}).status_code == 412
+        assert note.content == "original"
+
+    def test_note_json_get_carries_only_a_weak_tag(self):
+        note = FakeVaultNote("doc.md", "original")
+        with httpx.Client(transport=httpx.MockTransport(note.handler)) as http:
+            response = http.get(
+                "http://x/vault/doc.md",
+                headers={"Accept": "application/vnd.olrapi.note+json"},
+            )
+        assert response.headers["etag"].startswith("W/")
+
+    def test_tag_tracks_content_only(self):
+        assert content_etag("a") == content_etag("a") != content_etag("b")
+
+
+class TestPreconditions:
+    async def test_read_note_returns_file_etag_not_json_body_tag(self):
+        note = FakeVaultNote("doc.md", "# Doc\n")
+        async with make_client(note.handler) as client:
+            _body, etag = await client.read_note("doc.md")
+        assert etag == note.etag
+
+    async def test_read_note_etag_is_never_newer_than_content(self):
+        # The note changes between read_note's two requests. The returned
+        # tag must then be the OLDER version, so a write based on what the
+        # caller actually saw fails safe instead of clobbering the change.
+        note = FakeVaultNote("doc.md", "# Doc\n\nv1\n")
+
+        def racy(request):
+            response = note.handler(request)
+            if request.method == "HEAD":
+                note.content = "# Doc\n\nuser edit\n"
+            return response
+
+        async with make_client(racy) as client:
+            body, etag = await client.read_note("doc.md")
+            assert body["content"] == "# Doc\n\nuser edit\n"
+            with pytest.raises(PreconditionFailed):
+                await client.write_note("doc.md", "agent rewrite", if_match=etag)
+        assert note.content == "# Doc\n\nuser edit\n"
+
+    @pytest.mark.parametrize("op", WRITE_OPS)
+    async def test_current_etag_succeeds(self, op):
+        note = FakeVaultNote("doc.md", "# Doc\n\nbody\n")
+        async with make_client(precondition_handler(note)) as client:
+            _body, etag = await client.read_note("doc.md")
+            result = await _write(client, op, etag)
+        if op == "delete":
+            assert note.content is None
+            return
+        new_etag = result[1] if op == "patch" else result
+        # The returned tag is the note's new version, ready for the next write.
+        assert new_etag == note.etag != etag
+
+    @pytest.mark.parametrize("op", WRITE_OPS)
+    async def test_out_of_band_edit_makes_write_fail_and_preserves_it(self, op):
+        # Acceptance criterion: read → someone else edits → conditional write
+        # is refused with a distinct error and the edit survives.
+        note = FakeVaultNote("doc.md", "# Doc\n\nbody\n")
+        async with make_client(precondition_handler(note)) as client:
+            _body, etag = await client.read_note("doc.md")
+            note.content = "# Doc\n\nuser typed this\n"
+            with pytest.raises(PreconditionFailed) as exc_info:
+                await _write(client, op, etag)
+        assert note.content == "# Doc\n\nuser typed this\n"
+        msg = str(exc_info.value)
+        assert "Precondition failed" in msg
+        assert "nothing was written" in msg
+        assert "doc.md" in msg
+
+    @pytest.mark.parametrize("op", WRITE_OPS)
+    async def test_no_precondition_headers_without_if_match(self, op):
+        # Unconditional writes must stay exactly as before.
+        note = FakeVaultNote("doc.md", "# Doc\n")
+        async with make_client(precondition_handler(note)) as client:
+            await _write(client, op, None)
+        write = note.requests[-1]
+        assert "if-match" not in write.headers
+        assert "if-none-match" not in write.headers
+
+    async def test_create_only_writes_absent_note(self):
+        note = FakeVaultNote("doc.md")
+        async with make_client(note.handler) as client:
+            etag = await client.write_note("doc.md", "fresh", if_none_match="*")
+        assert note.content == "fresh"
+        assert etag == note.etag
+
+    async def test_create_only_refuses_existing_note(self):
+        note = FakeVaultNote("doc.md", "keep me")
+        async with make_client(note.handler) as client:
+            with pytest.raises(PreconditionFailed):
+                await client.write_note("doc.md", "clobber", if_none_match="*")
+        assert note.content == "keep me"
+
+    async def test_malformed_etag_is_not_reported_as_a_conflict(self):
+        # 40024 means the caller mangled the tag, not that the note moved —
+        # telling them to re-read and retry would loop forever.
+        note = FakeVaultNote("doc.md", "x")
+        async with make_client(note.handler) as client:
+            with pytest.raises(ToolError) as exc_info:
+                await client.write_note("doc.md", "y", if_match='"a" "b"')
+        assert not isinstance(exc_info.value, PreconditionFailed)
+        assert "Malformed etag" in str(exc_info.value)
+        assert note.content == "x"
+
+    @pytest.mark.parametrize("header", [None, "", 'W/"109-abc"'])
+    def test_etag_drops_missing_and_weak_tags(self, header):
+        headers = {} if header is None else {"ETag": header}
+        assert ObsidianVaultClient._etag(httpx.Response(200, headers=headers)) is None
 
 
 class TestDeleteNote:

@@ -47,6 +47,7 @@ tests/
 ├── test_main.py         # CLI helpers (_env_int, _parse_args, _strip_host_brackets) and main() integration
 ├── test_curators.py
 ├── test_client.py       # httpx.MockTransport
+├── plugin_fakes.py      # FakeVaultNote: stateful fake of the plugin's ETag / If-Match contract
 └── test_tools.py        # FastMCP Client(mcp) integration
 ```
 
@@ -104,7 +105,8 @@ Transport errors are caught in `_request()` and mapped to `ToolError`.
 | HTTP 400 + `errorCode: 40080` | `_raise_for_status` | `ToolError`: invalid PATCH target (+ `hint` when the caller passed one) |
 | HTTP 400 + `errorCode: 40082/40083/40084` | `_raise_for_status` | `ToolError`: "PATCH protocol mismatch" — client/plugin disagree on the markdown-patch format. Names the version header we send; check the plugin version |
 | HTTP 409 (patch) | `_raise_for_status` (generic) | `ToolError`: content preexists / frontmatter key collision |
-| HTTP 412 (patch) | `_raise_for_status` (generic) | `ToolError`: precondition failed. Only reachable once `If-Match` is implemented — this client sends no preconditions today |
+| HTTP 412 / `errorCode: 41200` | `_raise_for_status` | `PreconditionFailed` (subclass of `ToolError`): note changed since the caller's `if_match` version (or exists, for `create_only`); nothing was written |
+| HTTP 400 + `errorCode: 40024` | `_raise_for_status` | `ToolError`: "Malformed etag" — deliberately *not* `PreconditionFailed`, since re-reading and retrying can't fix a mangled tag |
 | `httpx.ConnectError` | `_request` | `ToolError`: "Cannot connect…, is Obsidian running?" |
 | `httpx.ConnectTimeout` | `_request` | `ToolError`: timed out after `CONNECT_TIMEOUT` (10 s) |
 | `httpx.TimeoutException` (read/write/pool) | `_request` | `ToolError`: timed out after `self._timeout` (default 30 s) |
@@ -126,7 +128,7 @@ The **tool API is unchanged**: callers still pass the full heading path from the
 
 Under v2 an unmatched heading comes back as **404** (`TargetNotFoundError`), not `40080`. Since a 404 on PATCH otherwise reads identically to "the note doesn't exist", `patch_note` passes `HEADING_TARGET_HINT` into `_raise_for_status(..., hint=...)` for heading targets only. Don't hardcode that hint in `_raise_for_status` again — it used to fire on every `40080`, including frontmatter-key patches where the `::` advice is meaningless.
 
-Not yet implemented from v5.x: `If-Match`/`If-None-Match` preconditions (the real fix for read-then-write clobbering), the v2 `delete` operation, path-element targeting (`/vault/note.md/heading/My%20Heading`), and array/object frontmatter via the `value` carrier (Guard B's scalar-only rule is now self-imposed, not a plugin limit).
+Not yet implemented from v5.x: the v2 `delete` operation, path-element targeting (`/vault/note.md/heading/My%20Heading`), and array/object frontmatter via the `value` carrier (Guard B's scalar-only rule is now self-imposed, not a plugin limit).
 
 ### Search endpoints differ by type
 
@@ -138,7 +140,16 @@ These are different endpoints with different request formats — not the same en
 
 ### PUT returns 204 for both create and update
 
-No way to distinguish via status code. Use `"written"` as the unified status value.
+No way to distinguish via status code, so an unconditional `write_note` reports `"written"` either way. `create_only=True` sends `If-None-Match: *`, which *does* distinguish: success means the note was created (`"created"`), and an existing note comes back as 412, which the tool rewords to "already exists".
+
+### ETags and preconditions (plugin 5.x)
+
+Probed live against 5.5.2. All four write tools take an optional `if_match`, sent as `If-Match`. `read_note` and every write return the note's `etag`.
+
+- **The file ETag is strong and content-derived.** Rewriting identical bytes keeps it; any edit moves it. It is returned on GET/HEAD `text/markdown`, PUT, POST and PATCH.
+- **The note+json GET that `read_note` relies on does *not* carry it.** Express stamps a *weak* tag (`W/"…"`) hashed from the JSON response body, and does the same on every error response. The plugin compares `If-Match` strongly, so a weak tag can never match. `_etag()` drops weak tags rather than hand back one that guarantees a 412.
+- **`read_note` therefore makes two requests: HEAD (`Accept: text/markdown`) for the tag, *then* the note+json GET.** Don't swap them. With the tag fetched first, a change between the two requests leaves the tag *older* than the content, so a write based on it fails safe with 412. The other order hands back a tag newer than what the caller read, which is exactly the silent clobber this feature exists to prevent. `test_read_note_etag_is_never_newer_than_content` pins this.
+- **Preconditions are honoured on PUT, POST, PATCH *and* DELETE.** `*` and comma-separated lists work. `If-Match` against a missing note is 412. An unquoted tag isn't malformed, it just never matches (412); empty or space-separated lists are `40024`.
 
 ### Newlines not automatic on append operations
 
@@ -148,7 +159,7 @@ Both `append_note` (POST) and `patch_note` with `operation: "append"` do not add
 
 All client tests use `httpx.MockTransport`. Each REST API method gets its own mock handler matching the method + path pattern. For multi-vault tests, create separate mock transports per vault.
 
-**A mock that returns `200` for everything is worse than no test.** The patch handlers used to do exactly that, asserting nothing about required headers — so the suite stayed fully green while every live `patch_note` call was failing with `40084`. Where a request has a contract the plugin actually enforces, the mock must enforce it too: `tests/test_client.py::markdown_patch_v2_handler` rejects what the real plugin rejects (missing/invalid version header, a heading `Target` that isn't a JSON array, v1-only headers under v2) and all PATCH success-path tests route through it. `test_contract_handler_rejects_nonconformant_requests` guards the guard, so it can't quietly go permissive.
+**A mock that returns `200` for everything is worse than no test.** The patch handlers used to do exactly that, asserting nothing about required headers — so the suite stayed fully green while every live `patch_note` call was failing with `40084`. Where a request has a contract the plugin actually enforces, the mock must enforce it too: `tests/test_client.py::markdown_patch_v2_handler` rejects what the real plugin rejects (missing/invalid version header, a heading `Target` that isn't a JSON array, v1-only headers under v2) and all PATCH success-path tests route through it. `test_contract_handler_rejects_nonconformant_requests` guards the guard, so it can't quietly go permissive. The same goes for preconditions: `tests/plugin_fakes.py::FakeVaultNote` keeps real note state, computes content-derived tags, serves only a weak tag on note+json, and refuses stale / malformed / weak `If-Match` exactly as the plugin does. `TestPreconditionFake` guards it.
 
 ## Manual Smoke Checklist
 
@@ -164,6 +175,7 @@ The automated test suite mocks every HTTP exchange. A handful of assumptions are
 5. **`patch_note`** with `target_type="heading"`, `target="Parent::Child"` — confirm the right heading is targeted. This exercises the markdown-patch v2 `Target` round-trip (`::` path → JSON array → percent-encoded → plugin decodes and matches structurally), the single most fragile contract point in the client. Then repeat for `target_type="block-reference"` and `target_type="frontmatter-key"`, each with `append` / `prepend` / `replace` — the version header and target encoding are shared by all nine combinations, so a v2 regression can hide in any of them.
    **Also re-check the plugin version** (`manifest.json` in the vault's `.obsidian/plugins/obsidian-local-rest-api/`). The docs are written against **5.5.2**; a bump is the single likeliest cause of a sudden patch failure, and the plugin's own error text is the best source for what changed.
 6. **`write_note`** then **`append_note`** then **`delete_note`** — full destructive round-trip against a throwaway file. Confirm `delete_note` actually requires `confirm: true` (Pydantic schema should still accept `confirm: false` and the runtime gate should reject).
+   **Then preconditions:** `read_note` → confirm `etag` equals the plugin's own `ETag` from a HEAD and is not `W/`-prefixed. For each of the four write tools: `read_note`, edit the note out of band (raw PUT, or type in Obsidian), then call the tool with the stale `if_match` → it must fail with "Precondition failed" and leave the edit intact. Also `write_note(create_only=True)` against an existing note → "already exists", untouched.
 7. **`search_vault`** with `search_type="text"` — confirm `results[].context` strings are populated.
 8. **`search_vault`** with `search_type="jsonlogic"` and a real expression like `{"in": ["#project", {"var": "tags"}]}` — confirm matches.
 9. **`search_vault`** with `search_type="dataview"` in a vault **with** Dataview installed — confirm `warning` is `None`. In a vault **without** Dataview — confirm `warning` is `"Dataview not available, fell back to text search"` and results come from the text search fallback.
