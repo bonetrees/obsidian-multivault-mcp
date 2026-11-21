@@ -2149,22 +2149,60 @@ class TestPatchChildHeadings:
         assert seen[0].headers["within"] == str(within)
         assert "target-scope" not in seen[0].headers
 
-    async def test_within_out_of_range_uses_within_hint(self):
+    @pytest.mark.parametrize(
+        "path, target, within, plugin_says",
+        [
+            # Live 5.5.2 messages for the three misses a `within` 404 can be.
+            ("doc.md", "Doc", 5, "has 2 top-level blocks. With 'within'"),
+            ("doc.md", "Nope", 0, 'could not resolve heading target ["Nope"]. With'),
+            ("missing.md", "Doc", 0, "Not Found. With 'within'"),
+        ],
+    )
+    async def test_within_404_hint_covers_every_cause(self, path, target, within, plugin_says):
+        # The hint can't tell the three apart reliably (a missing note is a
+        # bare "Not Found"), so it names all three, and a wrong heading still
+        # gets the full-path advice rather than only block-index advice.
         note = FakeHeadingNote("doc.md", PARENT_WITH_CHILDREN)
         async with self._client(note, []) as client:
             with pytest.raises(NotFound) as exc_info:
                 await client.patch_note(
-                    "doc.md",
+                    path,
                     operation="replace",
                     target_type="heading",
-                    target="Doc",
+                    target=target,
                     content="x",
-                    within=5,
+                    within=within,
                 )
         message = str(exc_info.value)
-        assert "has 2 top-level blocks" in message
+        assert plugin_says in message
+        assert ObsidianVaultClient.WITHIN_TARGET_HINT in message
+        assert ObsidianVaultClient.HEADING_TARGET_HINT in message
         assert ObsidianVaultClient.WITHIN_HINT in message
-        assert ObsidianVaultClient.HEADING_TARGET_HINT not in message
+        assert "the note doesn't exist" in message
+
+    @pytest.mark.parametrize(
+        "plugin_message, expected",
+        [
+            ('Not Found\ncould not resolve heading target ["X"]', '["X"]. Heading targets'),
+            ("Heading not found.", "Heading not found. Heading targets"),
+            ("Trailing space ", "Trailing space. Heading targets"),
+        ],
+    )
+    async def test_hint_is_separated_from_the_plugin_message(self, plugin_message, expected):
+        def handler(_request):
+            return httpx.Response(404, json={"errorCode": 40400, "message": plugin_message})
+
+        async with make_client(markdown_patch_v2_handler(handler)) as client:
+            with pytest.raises(NotFound) as exc_info:
+                await client.patch_note(
+                    "doc.md",
+                    operation="append",
+                    target_type="heading",
+                    target="X",
+                    content="x",
+                )
+        assert expected in str(exc_info.value)
+        assert ".." not in str(exc_info.value)
 
     async def test_unknown_heading_falls_through_to_the_patch_404(self):
         # The map has no such heading, so the check stands aside and the

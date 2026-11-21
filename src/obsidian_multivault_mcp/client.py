@@ -270,9 +270,14 @@ class ObsidianVaultClient:
             return
         body = self._safe_json_object(response)
         msg = body.get("message") or (response.text.strip() if response.text else "(no body)")
+        msg = msg.rstrip()
         code = body.get("errorCode")
         location = self._format_location(path)
-        hint_part = f" {hint}" if hint else ""
+        # Plugin messages often end without a full stop ('…has 2 top-level
+        # blocks'), which would run straight into the hint's first sentence.
+        hint_part = ""
+        if hint:
+            hint_part = f" {hint}" if msg.endswith((".", "!", "?")) else f". {hint}"
         if response.status_code == 401:
             raise ToolError(
                 f"Authentication failed for vault '{self.name}' during {operation}"
@@ -540,6 +545,14 @@ class ObsidianVaultClient:
         "'within' counts the top-level blocks (paragraphs, lists, tables…) "
         "above the heading's first child heading: 0 is the first, -1 the last. "
         "A heading with no text above its first child has none."
+    )
+    # A 404 on a `within` PATCH can mean any of three misses, and the
+    # plugin's message only names the last two (a missing note is a bare
+    # "Not Found"), so the hint covers all three rather than guessing.
+    WITHIN_TARGET_HINT = (
+        "With 'within', a 404 means the note doesn't exist, the heading path "
+        "didn't match, or the block index is out of range (the plugin's message "
+        f"names the last two). {HEADING_TARGET_HINT} {WITHIN_HINT}"
     )
 
     # v2 document map: the note's heading tree as nested objects, e.g.
@@ -968,7 +981,9 @@ class ObsidianVaultClient:
             "patch_note",
             path,
             hint={
-                "heading": self.HEADING_TARGET_HINT if within is None else self.WITHIN_HINT,
+                "heading": (
+                    self.HEADING_TARGET_HINT if within is None else self.WITHIN_TARGET_HINT
+                ),
                 "frontmatter": self.FRONTMATTER_TARGET_HINT,
             }.get(wire_target_type),
         )

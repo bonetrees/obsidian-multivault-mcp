@@ -327,7 +327,8 @@ class FakeHeadingNote:
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
         if request.url.path != self.url_path:
-            return self._not_found("no such file")
+            # Live 5.5.2: a missing file is a bare "Not Found", no detail line.
+            return httpx.Response(404, json={"errorCode": 40400, "message": "Not Found"})
         if request.method == "GET" and request.headers.get("accept") == self.DOCUMENT_MAP_ACCEPT:
             return httpx.Response(200, json=self.document_map())
         if request.method != "PATCH" or request.headers.get("target-type") != "heading":
@@ -335,7 +336,7 @@ class FakeHeadingNote:
         segments = tuple(json.loads(urllib.parse.unquote(request.headers["target"])))
         found = [i for i, path in self._paths().items() if path == segments]
         if not found:
-            return self._not_found(f"could not resolve heading target {list(segments)}")
+            return self._not_found(f"could not resolve heading target {json.dumps(list(segments))}")
         head = found[0]
         level = self.items[head][0]
         end = next(
