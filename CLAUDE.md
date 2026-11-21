@@ -241,7 +241,7 @@ If any of these diverges from the docs, the mock-based tests are lying. Open an 
 1. Create `src/obsidian_multivault_mcp/tools/new_tool.py`
 2. Import `mcp`, `get_client` from `..server` and types from `..validation_types`
 3. Write `curate_new_result(raw: dict) -> dict` — handle timestamp conversion, field renames, frontmatter stripping if applicable. Reuse helpers from `tools/_helpers.py` (`strip_frontmatter`, `epoch_ms_to_iso`, `curate_simple_match`, `curate_structured_match`).
-4. Write `@mcp.tool(annotations={...}, tags={...})` async function with `Annotated` params and an LLM-facing docstring. Let `ToolError` propagate from the client layer.
+4. Write `@mcp.tool(annotations={...}, tags={...})` async function with `Annotated` params and an LLM-facing docstring. Keep the docstring under 2KB, with detail in parameter descriptions (see Code Style). Let `ToolError` propagate from the client layer.
 5. Add a client method to `client.py` — per-endpoint pattern.
 6. **No edits to `tools/__init__.py` needed** — `pkgutil.iter_modules()` auto-discovers any non-`_`-prefixed module at import time.
 7. Add tests: curator in `test_curators.py`, integration in `test_tools.py` using the `mcp_client` + `vault_handlers` fixtures from `conftest.py`.
@@ -252,6 +252,7 @@ If any of these diverges from the docs, the mock-based tests are lying. Open an 
 - Python 3.13, type hints on all functions
 - Black + Pylint
 - LLM-facing docstrings on all tools (written for tool discovery, not developers)
+- **Tool docstrings stay under 2KB.** Claude Code truncates tool descriptions at 2KB before the model sees them, so anything past the cut is silently lost (`patch_note`'s whole operations section once was). Put the rules a caller must not miss first, and per-parameter detail in `Annotated[..., Field(description=...)]`, which isn't truncated. `tests/test_tools.py::TestToolDescriptions` enforces the limit for every tool.
 - Logging: `%s` lazy formatting, stderr, `setup_logging("obsidian-multivault-mcp.module")`
 - `ToolError` for all failures, never `{"error": ...}` dicts
 - One tool per file in `tools/`

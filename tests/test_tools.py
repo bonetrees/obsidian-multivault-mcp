@@ -564,6 +564,35 @@ class TestPatchNoteChildHeadings:
         assert props["replace_children"]["type"] == "boolean"
 
 
+class TestToolDescriptions:
+    """Claude Code truncates a tool description at 2KB before the model sees
+    it (obsidian-local-rest-api#295). Past the cut, rules are silently lost:
+    patch_note's whole operations section once was. Detail that doesn't fit
+    belongs in parameter descriptions, which aren't truncated."""
+
+    CLAUDE_CODE_DESCRIPTION_LIMIT = 2048
+
+    async def test_every_tool_description_fits(self, mcp_client):
+        too_long = {
+            tool.name: len(tool.description or "")
+            for tool in await mcp_client.list_tools()
+            if len(tool.description or "") > self.CLAUDE_CODE_DESCRIPTION_LIMIT
+        }
+        assert too_long == {}
+
+    async def test_patch_note_critical_rules_are_in_the_description(self, mcp_client):
+        tool = next(t for t in await mcp_client.list_tools() if t.name == "patch_note")
+        for rule in ("full path from the document root", "relative to the target", "refused"):
+            assert rule in tool.description
+        for param in ("within", "replace_children"):
+            assert param in tool.description
+
+    async def test_every_patch_note_parameter_is_described(self, mcp_client):
+        tool = next(t for t in await mcp_client.list_tools() if t.name == "patch_note")
+        props = tool.inputSchema["properties"]
+        assert [name for name, schema in props.items() if not schema.get("description")] == []
+
+
 class TestPatchNoteFrontmatter:
     """End-to-end coverage of the v0.2.0 frontmatter fix: the friendly
     `frontmatter-key` enum must reach the plugin as `frontmatter` over JSON,
