@@ -8,7 +8,7 @@ import pytest
 from fastmcp.exceptions import ToolError
 
 from obsidian_multivault_mcp.client import NotFound, ObsidianVaultClient, PreconditionFailed
-from tests.plugin_fakes import FakeFrontmatterNote, FakeVaultNote, content_etag
+from tests.plugin_fakes import FakeFrontmatterNote, FakeHeadingNote, FakeVaultNote, content_etag
 
 
 def make_client(handler, **overrides) -> ObsidianVaultClient:
@@ -264,7 +264,12 @@ class TestAppendNote:
             await client.append_note("log.md", "\nnew entry")
 
 
-def markdown_patch_v2_handler(response_factory=None):
+def document_map(headings=None):
+    """A v2 document-map body with the given nested heading tree."""
+    return {"version": "abc123", "frontmatterFields": [], "headings": headings or {}, "blocks": []}
+
+
+def markdown_patch_v2_handler(response_factory=None, document_map_factory=None):
     """Build a handler that emulates obsidian-local-rest-api's PATCH contract.
 
     The point is to be *strict where the plugin is strict*. The mocks this
@@ -274,9 +279,20 @@ def markdown_patch_v2_handler(response_factory=None):
     rejected one. This handler refuses exactly what the plugin refuses, so
     dropping the version header or regressing the heading encoding turns red
     here instead of in production.
+
+    It also serves the v2 document map that a heading replace checks for
+    children, from ``document_map_factory()`` (e.g. a FakeHeadingNote's
+    ``document_map``). Without one the tree is empty, so a replace sees a
+    childless target.
     """
 
     def handler(request):
+        if (
+            request.method == "GET"
+            and request.headers.get("accept") == "application/vnd.olrapi.document-map+json"
+        ):
+            body = document_map_factory() if document_map_factory else document_map()
+            return httpx.Response(200, json=body)
         version = request.headers.get("markdown-patch-version")
         if version is None:
             # errorCode 40084: header targeting is ambiguous between the two
@@ -1982,3 +1998,279 @@ class TestLifecycle:
         async with client:
             assert client._http is not None  # pylint: disable=protected-access
         assert client._http is None  # pylint: disable=protected-access
+
+
+PARENT_WITH_CHILDREN = (
+    "# Doc\n\nintro para\n\n- task one\n- task two\n\n### Child\n\nchild body\n\n"
+    "## Sib\n\nsib body\n"
+)
+
+
+class TestHeadingFake:
+    """Guard the guard: the child-protection tests are only as good as this
+    fake's fidelity to how the plugin replaces a heading's subtree."""
+
+    @staticmethod
+    def _patch(note, operation, target, content, **headers):
+        with httpx.Client(transport=httpx.MockTransport(note.handler)) as http:
+            return http.patch(
+                "http://x/vault/doc.md",
+                content=content.encode(),
+                headers={
+                    "Operation": operation,
+                    "Target-Type": "heading",
+                    "Target": urllib.parse.quote(json.dumps(target)),
+                    **headers,
+                },
+            )
+
+    def test_document_map_matches_live_shape(self):
+        note = FakeHeadingNote("doc.md", PARENT_WITH_CHILDREN)
+        assert note.document_map()["headings"] == {"Doc": {"Child": {}, "Sib": {}}}
+
+    def test_replace_without_within_deletes_every_child(self):
+        note = FakeHeadingNote("doc.md", PARENT_WITH_CHILDREN)
+        assert self._patch(note, "replace", ["Doc"], "new intro").status_code == 200
+        assert note.markdown == "# Doc\n\nnew intro\n"
+
+    def test_within_edits_one_intro_block_and_keeps_children(self):
+        note = FakeHeadingNote("doc.md", PARENT_WITH_CHILDREN)
+        self._patch(note, "append", ["Doc"], "\n- task three", Within="-1")
+        assert "- task two\n- task three\n\n### Child\n\nchild body\n\n## Sib" in note.markdown
+
+    def test_within_out_of_range_is_404(self):
+        note = FakeHeadingNote("doc.md", PARENT_WITH_CHILDREN)
+        response = self._patch(note, "replace", ["Doc"], "x", Within="2")
+        assert response.status_code == 404
+        assert "has 2 top-level blocks" in response.json()["message"]
+        assert note.markdown == PARENT_WITH_CHILDREN
+
+
+class TestPatchChildHeadings:
+    """A heading replace must not silently delete the heading's children."""
+
+    @staticmethod
+    def _client(note, seen):
+        """Client over the fake, recording every request in ``seen``.
+
+        Recording happens outside markdown_patch_v2_handler, which answers
+        document-map GETs itself, so ``seen`` shows the GETs too.
+        """
+        inner = markdown_patch_v2_handler(note.handler, document_map_factory=note.document_map)
+
+        def handler(request):
+            seen.append(request)
+            return inner(request)
+
+        return make_client(handler)
+
+    async def test_replace_on_parent_with_children_is_refused(self):
+        note = FakeHeadingNote("doc.md", PARENT_WITH_CHILDREN)
+        seen = []
+        async with self._client(note, seen) as client:
+            with pytest.raises(ToolError) as exc_info:
+                await client.patch_note(
+                    "doc.md",
+                    operation="replace",
+                    target_type="heading",
+                    target="Doc",
+                    content="new intro",
+                )
+        message = str(exc_info.value)
+        assert "refusing to replace heading 'Doc'" in message
+        assert '"Child", "Sib"' in message
+        assert "within=" in message
+        assert "replace_children=True" in message
+        assert "Doc::Child" in message
+        assert note.markdown == PARENT_WITH_CHILDREN
+        # Map consulted, PATCH never sent.
+        assert [r.method for r in seen] == ["GET"]
+        assert seen[0].headers["accept"] == "application/vnd.olrapi.document-map+json"
+        assert seen[0].headers["markdown-patch-version"] == "2"
+
+    async def test_replace_on_childless_heading_is_sent(self):
+        note = FakeHeadingNote("doc.md", PARENT_WITH_CHILDREN)
+        seen = []
+        async with self._client(note, seen) as client:
+            await client.patch_note(
+                "doc.md",
+                operation="replace",
+                target_type="heading",
+                target="Doc::Child",
+                content="new child body",
+            )
+        assert "### Child\n\nnew child body\n\n## Sib\n\nsib body" in note.markdown
+        assert [r.method for r in seen] == ["GET", "PATCH"]
+
+    async def test_replace_children_opts_into_the_full_replace(self):
+        note = FakeHeadingNote("doc.md", PARENT_WITH_CHILDREN)
+        seen = []
+        async with self._client(note, seen) as client:
+            await client.patch_note(
+                "doc.md",
+                operation="replace",
+                target_type="heading",
+                target="Doc",
+                content="new intro",
+                replace_children=True,
+            )
+        assert note.markdown == "# Doc\n\nnew intro\n"
+        # The caller already said yes, so no document-map lookup is spent.
+        assert [r.method for r in seen] == ["PATCH"]
+
+    @pytest.mark.parametrize(
+        "operation, within, content, expected",
+        [
+            ("replace", 0, "new intro para", "# Doc\n\nnew intro para\n\n- task one"),
+            ("append", 1, "\n- task three", "- task two\n- task three\n\n### Child"),
+            ("append", -1, "\n- task three", "- task two\n- task three\n\n### Child"),
+            ("prepend", 1, "- task zero\n", "- task zero\n- task one"),
+        ],
+    )
+    async def test_within_edits_intro_and_keeps_children(
+        self, operation, within, content, expected
+    ):
+        note = FakeHeadingNote("doc.md", PARENT_WITH_CHILDREN)
+        seen = []
+        async with self._client(note, seen) as client:
+            await client.patch_note(
+                "doc.md",
+                operation=operation,
+                target_type="heading",
+                target="Doc",
+                content=content,
+                within=within,
+            )
+        assert expected in note.markdown
+        assert note.markdown.endswith("### Child\n\nchild body\n\n## Sib\n\nsib body\n")
+        # Within never needs the child check, and must not add a Target-Scope:
+        # the plugin's default (content) is what splices into the block.
+        assert [r.method for r in seen] == ["PATCH"]
+        assert seen[0].headers["within"] == str(within)
+        assert "target-scope" not in seen[0].headers
+
+    async def test_within_out_of_range_uses_within_hint(self):
+        note = FakeHeadingNote("doc.md", PARENT_WITH_CHILDREN)
+        async with self._client(note, []) as client:
+            with pytest.raises(NotFound) as exc_info:
+                await client.patch_note(
+                    "doc.md",
+                    operation="replace",
+                    target_type="heading",
+                    target="Doc",
+                    content="x",
+                    within=5,
+                )
+        message = str(exc_info.value)
+        assert "has 2 top-level blocks" in message
+        assert ObsidianVaultClient.WITHIN_HINT in message
+        assert ObsidianVaultClient.HEADING_TARGET_HINT not in message
+
+    async def test_unknown_heading_falls_through_to_the_patch_404(self):
+        # The map has no such heading, so the check stands aside and the
+        # PATCH reports the miss with the usual full-path hint.
+        note = FakeHeadingNote("doc.md", PARENT_WITH_CHILDREN)
+        seen = []
+        async with self._client(note, seen) as client:
+            with pytest.raises(NotFound) as exc_info:
+                await client.patch_note(
+                    "doc.md",
+                    operation="replace",
+                    target_type="heading",
+                    target="Child",
+                    content="x",
+                )
+        assert ObsidianVaultClient.HEADING_TARGET_HINT in str(exc_info.value)
+        assert [r.method for r in seen] == ["GET", "PATCH"]
+
+    async def test_list_target_walks_the_map_by_segment(self):
+        seen = []
+
+        def record(request):
+            seen.append(request)
+            return httpx.Response(200)
+
+        def doc_map():
+            return document_map({"Q1::Q2": {"Child": {}}})
+
+        async with make_client(markdown_patch_v2_handler(record, doc_map)) as client:
+            with pytest.raises(ToolError, match="refusing"):
+                await client.patch_note(
+                    "doc.md",
+                    operation="replace",
+                    target_type="heading",
+                    target=["Q1::Q2"],
+                    content="x",
+                )
+        # A list target is walked segment by segment, never split on '::',
+        # so the child is found and no PATCH goes out.
+        assert seen == []
+
+    async def test_repeated_heading_marker_is_stripped_from_message(self):
+        def doc_map():
+            return document_map({"Doc": {"Log": {}, "Log\u2063\u2063": {}}})
+
+        async with make_client(markdown_patch_v2_handler(None, doc_map)) as client:
+            with pytest.raises(ToolError) as exc_info:
+                await client.patch_note(
+                    "doc.md",
+                    operation="replace",
+                    target_type="heading",
+                    target="Doc",
+                    content="x",
+                )
+        assert '("Log", "Log")' in str(exc_info.value)
+
+    async def test_heading_level_warning_skipped_for_within(self):
+        note = FakeHeadingNote("doc.md", PARENT_WITH_CHILDREN)
+        async with self._client(note, []) as client:
+            warnings, _etag = await client.patch_note(
+                "doc.md",
+                operation="append",
+                target_type="heading",
+                target="Doc",
+                content="\n### not a heading here",
+                within=0,
+            )
+        assert warnings == []
+
+    @pytest.mark.parametrize(
+        "kwargs, fragment",
+        [
+            ({"operation": "delete", "within": 0}, "'within' applies only"),
+            (
+                {"target_type": "frontmatter-key", "target": "k", "within": 0},
+                "'within' applies only",
+            ),
+            (
+                {"target_type": "block-reference", "target": "b1", "within": 0},
+                "'within' applies only",
+            ),
+            ({"operation": "append", "replace_children": True}, "replace_children applies"),
+            ({"within": 0, "replace_children": True}, "replace_children applies"),
+            (
+                {"target_type": "frontmatter-key", "target": "k", "replace_children": True},
+                "replace_children applies",
+            ),
+        ],
+    )
+    async def test_invalid_combinations_rejected_before_request(self, kwargs, fragment):
+        seen = []
+
+        def handler(request):
+            seen.append(request)
+            return httpx.Response(200)
+
+        args = {
+            "operation": "replace",
+            "target_type": "heading",
+            "target": "Doc",
+            "content": "x",
+            **kwargs,
+        }
+        if args["operation"] == "delete":
+            args.pop("content")
+        async with make_client(handler) as client:
+            with pytest.raises(ToolError, match=fragment):
+                await client.patch_note("doc.md", **args)
+        assert seen == []

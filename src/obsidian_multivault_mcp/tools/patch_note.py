@@ -1,7 +1,7 @@
 """Tool: patch_note — surgical edit by heading, block reference, or frontmatter key."""
 
 from fastmcp import Context
-from pydantic import StrictBool
+from pydantic import StrictBool, StrictInt
 
 from ..server import get_client, mcp
 from ..validation_types import (
@@ -34,6 +34,8 @@ async def patch_note(
     value: FrontmatterValue | None = None,
     create_if_missing: StrictBool = False,
     delete_scope: DeleteScope | None = None,
+    within: StrictInt | None = None,
+    replace_children: StrictBool = False,
 ) -> dict:
     """Surgically edit a note by targeting a specific section.
 
@@ -83,12 +85,19 @@ async def patch_note(
       leading `\\n` in `content`** — the API does not add newlines
       automatically.
     - `prepend` — add content before the targeted section.
-    - `replace` — overwrite the targeted section's content entirely.
-      **Caution for headings:** replacing a parent heading overwrites the
-      entire section *including all child subheadings and their bodies*
-      (everything down to the next same-or-higher-level heading). To edit
-      only a parent's intro text without touching children, target the
-      deepest specific heading instead.
+    - `replace` — overwrite the targeted section's content entirely. For a
+      heading, that is everything beneath it **including all child
+      subheadings and their bodies**. So a heading `replace` on a heading
+      that has children is **refused** (nothing is written) unless you pass
+      `replace_children=True`. Usually you want one of these instead:
+      - To edit only the text above the first child heading, pass
+        `within`: the index of one top-level block there (a paragraph,
+        list, table…; `0` = first, `-1` = last). The edit applies to that
+        block only, and children are never touched. With `within`,
+        `replace` swaps the block, and `append`/`prepend` splice onto its
+        end/start, so `append` with `"\\n- new item"` extends a list.
+        Out-of-range indexes fail, naming how many blocks there are.
+      - To change one child, target it directly (`"Doc::Child"`).
     - `delete` — remove the target. How much goes is set by `delete_scope`:
       - `"all"` (default): the whole target. A heading goes **together
         with its body and every child subheading** beneath it; a block
@@ -133,8 +142,7 @@ async def patch_note(
     Strongly recommended whenever your content was derived from an
     earlier read. The result's `etag` is the note's new version.
     """
-    client = get_client(ctx, vault)
-    warnings, etag = await client.patch_note(
+    warnings, etag = await get_client(ctx, vault).patch_note(
         path=path,
         operation=operation,
         target_type=target_type,
@@ -144,6 +152,8 @@ async def patch_note(
         value=value,
         create_if_missing=create_if_missing,
         delete_scope=delete_scope,
+        within=within,
+        replace_children=replace_children,
     )
     return {
         "vault": vault,

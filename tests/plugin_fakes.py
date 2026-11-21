@@ -246,3 +246,129 @@ class FakeFrontmatterNote:
         else:
             del self.frontmatter[key]
         return httpx.Response(200, text="patched")
+
+
+class FakeHeadingNote:
+    """Stateful fake of the plugin's v2 heading PATCH and document map.
+
+    Mirrors plugin 5.5.2 as probed live, so a client that replaces a parent
+    heading loses the children here exactly as it would in a vault:
+
+    - A heading's `content` scope is its whole subtree. replace swaps all of
+      it, children included; append/prepend insert at the subtree's end/start.
+    - ``Within: <int>`` addresses one of the heading's intro blocks: the
+      top-level blocks above its first child heading (negative counts from
+      the end). replace swaps that block, append/prepend splice onto its
+      end/start literally, and children are never touched. Out of range is
+      404 / 40400 naming the block count.
+    - GET with the document-map Accept type returns the heading tree as
+      nested objects, e.g. {"Doc": {"Child": {}}}.
+
+    Not modelled: heading-level rebasing of content, whitespace management,
+    duplicate headings. The note is a list of blank-line-separated chunks,
+    each either a heading line or a body block, so test notes must use one
+    blank line between blocks. Route PATCHes through
+    markdown_patch_v2_handler so the v2 header contract is enforced too.
+    """
+
+    DOCUMENT_MAP_ACCEPT = "application/vnd.olrapi.document-map+json"
+
+    def __init__(self, path: str, markdown: str) -> None:
+        self.url_path = f"/vault/{path}"
+        self.items: list[tuple[int, str]] = self._parse(markdown)
+        self.requests: list[httpx.Request] = []
+
+    @staticmethod
+    def _parse(markdown: str) -> list[tuple[int, str]]:
+        """(level, text) per chunk; level 0 is a body block."""
+        items = []
+        for chunk in (c.strip("\n") for c in markdown.split("\n\n")):
+            if not chunk:
+                continue
+            hashes = len(chunk) - len(chunk.lstrip("#"))
+            if 1 <= hashes <= 6 and "\n" not in chunk and chunk[hashes : hashes + 1] == " ":
+                items.append((hashes, chunk[hashes + 1 :]))
+            else:
+                items.append((0, chunk))
+        return items
+
+    @property
+    def markdown(self) -> str:
+        return (
+            "\n\n".join(f"{'#' * level} {text}" if level else text for level, text in self.items)
+            + "\n"
+        )
+
+    def _paths(self) -> dict[int, tuple[str, ...]]:
+        """Item index → heading path, for every heading."""
+        paths: dict[int, tuple[str, ...]] = {}
+        stack: list[tuple[int, str]] = []
+        for index, (level, text) in enumerate(self.items):
+            if not level:
+                continue
+            while stack and stack[-1][0] >= level:
+                stack.pop()
+            stack.append((level, text))
+            paths[index] = tuple(t for _, t in stack)
+        return paths
+
+    def document_map(self) -> dict:
+        tree: dict = {}
+        for path in self._paths().values():
+            node = tree
+            for segment in path:
+                node = node.setdefault(segment, {})
+        return {"version": "fake", "frontmatterFields": [], "headings": tree, "blocks": []}
+
+    @staticmethod
+    def _not_found(message: str) -> httpx.Response:
+        return httpx.Response(404, json={"errorCode": 40400, "message": f"Not Found\n{message}"})
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        if request.url.path != self.url_path:
+            return self._not_found("no such file")
+        if request.method == "GET" and request.headers.get("accept") == self.DOCUMENT_MAP_ACCEPT:
+            return httpx.Response(200, json=self.document_map())
+        if request.method != "PATCH" or request.headers.get("target-type") != "heading":
+            return httpx.Response(405, json={"errorCode": 40500, "message": "Not modelled"})
+        segments = tuple(json.loads(urllib.parse.unquote(request.headers["target"])))
+        found = [i for i, path in self._paths().items() if path == segments]
+        if not found:
+            return self._not_found(f"could not resolve heading target {list(segments)}")
+        head = found[0]
+        level = self.items[head][0]
+        end = next(
+            (i for i in range(head + 1, len(self.items)) if 0 < self.items[i][0] <= level),
+            len(self.items),
+        )
+        operation = request.headers["operation"]
+        content = request.content.decode("utf-8")
+        if "within" in request.headers:
+            return self._patch_within(request, head, end, operation, content, list(segments))
+        new_items = self._parse(content)
+        if operation == "replace":
+            self.items[head + 1 : end] = new_items
+        elif operation == "append":
+            self.items[end:end] = new_items
+        else:
+            self.items[head + 1 : head + 1] = new_items
+        return httpx.Response(200, text=self.markdown)
+
+    def _patch_within(self, request, head, end, operation, content, segments):
+        intro = []
+        for i in range(head + 1, end):
+            if self.items[i][0]:
+                break
+            intro.append(i)
+        index = int(request.headers["within"])
+        if not -len(intro) <= index < len(intro):
+            return self._not_found(
+                f"`within` index {index} is out of range: {json.dumps(segments)} has "
+                f"{len(intro)} top-level blocks"
+            )
+        position = intro[index]
+        block = self.items[position][1]
+        spliced = {"replace": content, "append": block + content, "prepend": content + block}
+        self.items[position] = (0, spliced[operation].strip("\n"))
+        return httpx.Response(200, text=self.markdown)

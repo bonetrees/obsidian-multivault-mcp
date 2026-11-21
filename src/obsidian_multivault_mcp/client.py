@@ -4,6 +4,10 @@ One ObsidianVaultClient instance per configured vault. Each method maps to a
 single REST endpoint and raises ToolError on transport or HTTP failure.
 """
 
+# One class holds every endpoint by design (see CLAUDE.md), and most of its
+# length is the protocol notes beside the code.
+# pylint: disable=too-many-lines
+
 import json
 import math
 import os
@@ -527,6 +531,28 @@ class ObsidianVaultClient:
     TARGET_SCOPE_HEADER = "Target-Scope"
     _DELETE_SCOPE_WIRE = {"all": "markerAndContent", "content": "content", "marker": "marker"}
 
+    # Splices the edit into one of a heading's intro blocks: the top-level
+    # blocks above its first child heading (0 = first, -1 = last). Verified
+    # live with header targeting on 5.5.2: children are never touched, and an
+    # out-of-range index is 404/40400 naming how many blocks there are.
+    WITHIN_HEADER = "Within"
+    WITHIN_HINT = (
+        "'within' counts the top-level blocks (paragraphs, lists, tables…) "
+        "above the heading's first child heading: 0 is the first, -1 the last. "
+        "A heading with no text above its first child has none."
+    )
+
+    # v2 document map: the note's heading tree as nested objects, e.g.
+    # {"Doc": {"Child": {}, "Sib": {}}}. Used to find a heading's children.
+    DOCUMENT_MAP_ACCEPT = "application/vnd.olrapi.document-map+json"
+
+    @classmethod
+    def _heading_segments(cls, target: str | list[str]) -> list[str]:
+        """A heading target as the list of heading texts v2 addresses it by."""
+        if isinstance(target, list):
+            return target
+        return target.split(cls.HEADING_PATH_DELIMITER)
+
     @classmethod
     def _encode_patch_target(cls, wire_target_type: str, target: str | list[str]) -> str:
         """Percent-encode the Target header for one markdown-patch v2 request.
@@ -556,12 +582,61 @@ class ObsidianVaultClient:
         """
         if wire_target_type != "heading":
             return urllib.parse.quote(target, safe="")
-        if isinstance(target, list):
-            segments = target
-        else:
-            segments = target.split(cls.HEADING_PATH_DELIMITER)
+        segments = cls._heading_segments(target)
         # Compact separators keep the header short; the plugin JSON.parses it.
         return urllib.parse.quote(json.dumps(segments, separators=(",", ":")), safe="")
+
+    async def _heading_children(self, path: str, target: str | list[str]) -> list[str]:
+        """Direct child heading texts of a heading target, from the document map.
+
+        Returns [] when the heading isn't in the map, so the PATCH itself
+        reports the miss with its usual 404 and hint. A repeated heading's
+        map key carries an opaque non-printable suffix; that is stripped so
+        the names read cleanly in an error message.
+        """
+        response = await self._request(
+            "GET",
+            f"/vault/{self._encode_path(path)}",
+            operation="patch_note",
+            headers={
+                "Accept": self.DOCUMENT_MAP_ACCEPT,
+                self.MARKDOWN_PATCH_VERSION_HEADER: self.MARKDOWN_PATCH_VERSION,
+            },
+        )
+        self._raise_for_status(response, "patch_note", path)
+        body = self._parse_json(response, "patch_note")
+        node = body.get("headings") if isinstance(body, dict) else None
+        for segment in self._heading_segments(target):
+            node = node.get(segment) if isinstance(node, dict) else None
+        if not isinstance(node, dict):
+            return []
+        return ["".join(ch for ch in key if ch.isprintable()) for key in node]
+
+    async def _refuse_child_loss(self, location: str, path: str, target: str | list[str]) -> None:
+        """Refuse a heading replace that would silently delete child headings.
+
+        v2's `content` scope on a heading is its whole subtree, so a replace
+        meant for a parent's intro text also deletes every child section,
+        with no warning. The plugin will never refuse that, so this does,
+        unless the caller passed replace_children=True. One extra GET; there
+        is a small window between it and the PATCH, which is fine because
+        this guards against caller mistakes, not concurrent edits (if_match
+        covers those).
+        """
+        children = await self._heading_children(path, target)
+        if not children:
+            return
+        joined = self.HEADING_PATH_DELIMITER.join(self._heading_segments(target))
+        names = ", ".join(f'"{name}"' for name in children)
+        raise ToolError(
+            f"patch_note for vault '{self.name}'{location}: refusing to replace heading "
+            f"'{joined}', because a heading replace also deletes all of its child "
+            f"headings ({names}) and their contents. Nothing was written. To edit only "
+            "the text above the first child, pass within=<block index> (0 = first "
+            "block, -1 = last). To change one child, target it directly (e.g. "
+            f"'{joined}::{children[0]}'). To replace the whole section including its "
+            "children, pass replace_children=True."
+        )
 
     def _parse_patch_warnings(self, response: httpx.Response) -> list[dict]:
         """Extract the advisory notices a successful v2 patch can carry.
@@ -724,6 +799,41 @@ class ObsidianVaultClient:
             return "application/json", json.dumps(content).encode("utf-8")
         return "text/markdown", content.encode("utf-8")
 
+    def _patch_request(
+        self,
+        operation: str,
+        wire_target_type: str,
+        location: str,
+        target: str | list[str],
+        content: str | None,
+        value: Any,
+        if_match: str | None,
+        create_if_missing: bool,
+        delete_scope: str | None,
+        within: int | None,
+    ) -> dict[str, Any]:
+        """Headers and body for one PATCH, as keyword arguments for _request."""
+        headers = {
+            "Operation": operation,
+            "Target-Type": wire_target_type,
+            "Target": self._encode_patch_target(wire_target_type, target),
+            # Required: header targeting without an explicit version is
+            # rejected outright (40084). Note that Target-Delimiter and
+            # Trim-Target-Whitespace must NOT accompany this — the plugin
+            # reads either one as a v1 request and 40084s. This client has
+            # never sent them; don't start.
+            self.MARKDOWN_PATCH_VERSION_HEADER: self.MARKDOWN_PATCH_VERSION,
+            **self._precondition_headers(if_match),
+        }
+        if create_if_missing:
+            headers[self.CREATE_TARGET_HEADER] = "true"
+        if operation == "delete":
+            headers[self.TARGET_SCOPE_HEADER] = self._DELETE_SCOPE_WIRE[delete_scope or "all"]
+        if within is not None:
+            headers[self.WITHIN_HEADER] = str(within)
+        body = self._patch_body(headers, wire_target_type, location, target, content, value)
+        return {"headers": headers, "content": body}
+
     def _check_patch_args(
         self,
         location: str,
@@ -734,6 +844,8 @@ class ObsidianVaultClient:
         value: Any,
         create_if_missing: bool,
         delete_scope: str | None,
+        within: int | None = None,
+        replace_children: bool = False,
     ) -> None:
         """Refuse argument combinations the plugin would reject or misread.
 
@@ -746,6 +858,18 @@ class ObsidianVaultClient:
             raise ToolError(
                 f"{prefix} a list target is only for heading targets, and must name at "
                 "least one heading (an empty list would address the whole document)."
+            )
+        if within is not None and (wire_target_type != "heading" or operation == "delete"):
+            raise ToolError(
+                f"{prefix} 'within' applies only to append, prepend or replace on "
+                "heading targets."
+            )
+        if replace_children and (
+            wire_target_type != "heading" or operation != "replace" or within is not None
+        ):
+            raise ToolError(
+                f"{prefix} replace_children applies only to operation='replace' on a "
+                "heading target without 'within' (a 'within' edit never touches children)."
             )
         if operation == "delete":
             if content is not None or value is not None or create_if_missing:
@@ -779,6 +903,8 @@ class ObsidianVaultClient:
         value: Any = None,
         create_if_missing: bool = False,
         delete_scope: str | None = None,
+        within: int | None = None,
+        replace_children: bool = False,
     ) -> tuple[list[dict], str | None]:
         """Apply one surgical edit; returns (advisory warnings, new etag).
 
@@ -790,6 +916,10 @@ class ObsidianVaultClient:
 
         ``operation="delete"`` takes neither, and ``delete_scope`` (default
         "all") picks how much of the target goes — see _DELETE_SCOPE_WIRE.
+
+        A heading ``replace`` is refused when the heading has children, unless
+        ``replace_children`` is set — see _refuse_child_loss. ``within`` edits
+        one intro block instead and never touches children — see WITHIN_HEADER.
         """
         wire_target_type = self._TARGET_TYPE_WIRE.get(target_type, target_type)
         location = self._format_location(path)
@@ -802,30 +932,32 @@ class ObsidianVaultClient:
             value,
             create_if_missing,
             delete_scope,
+            within,
+            replace_children,
         )
-        headers = {
-            "Operation": operation,
-            "Target-Type": wire_target_type,
-            "Target": self._encode_patch_target(wire_target_type, target),
-            # Required: header targeting without an explicit version is
-            # rejected outright (40084). Note that Target-Delimiter and
-            # Trim-Target-Whitespace must NOT accompany this — the plugin
-            # reads either one as a v1 request and 40084s. This client has
-            # never sent them; don't start.
-            self.MARKDOWN_PATCH_VERSION_HEADER: self.MARKDOWN_PATCH_VERSION,
-            **self._precondition_headers(if_match),
-        }
-        if create_if_missing:
-            headers[self.CREATE_TARGET_HEADER] = "true"
-        if operation == "delete":
-            headers[self.TARGET_SCOPE_HEADER] = self._DELETE_SCOPE_WIRE[delete_scope or "all"]
-        body = self._patch_body(headers, wire_target_type, location, target, content, value)
+        if (
+            wire_target_type == "heading"
+            and operation == "replace"
+            and within is None
+            and not replace_children
+        ):
+            await self._refuse_child_loss(location, path, target)
         response = await self._request(
             "PATCH",
             f"/vault/{self._encode_path(path)}",
             operation="patch_note",
-            content=body,
-            headers=headers,
+            **self._patch_request(
+                operation,
+                wire_target_type,
+                location,
+                target,
+                content,
+                value,
+                if_match,
+                create_if_missing,
+                delete_scope,
+                within,
+            ),
         )
         # Hints are per target type. Under v2 an unmatched heading or a missing
         # frontmatter key comes back as 404 rather than 40080, and a 404 on
@@ -836,14 +968,18 @@ class ObsidianVaultClient:
             "patch_note",
             path,
             hint={
-                "heading": self.HEADING_TARGET_HINT,
+                "heading": self.HEADING_TARGET_HINT if within is None else self.WITHIN_HINT,
                 "frontmatter": self.FRONTMATTER_TARGET_HINT,
             }.get(wire_target_type),
         )
         # Plugin warnings first, then this client's own heading-level check.
+        # A `within` edit splices literally into one block, so the
+        # relative-level rule it checks doesn't apply there.
         return (
             self._parse_patch_warnings(response)
-            + self._heading_level_warnings(wire_target_type, target, content),
+            + self._heading_level_warnings(
+                wire_target_type, target, content if within is None else None
+            ),
             self._etag(response),
         )
 
