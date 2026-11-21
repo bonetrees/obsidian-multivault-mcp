@@ -13,7 +13,7 @@ import pytest
 from fastmcp.exceptions import ToolError
 
 from obsidian_multivault_mcp.client import ObsidianVaultClient
-from tests.plugin_fakes import FakeFrontmatterNote, FakeVaultNote
+from tests.plugin_fakes import FakeFrontmatterNote, FakeHeadingNote, FakeVaultNote
 
 
 # ---------- helpers ----------
@@ -509,6 +509,88 @@ class TestPatchNoteDelete:
         assert {"all", "content", "marker"} <= set(json.dumps(props["delete_scope"]).split('"'))
         assert "array" in json.dumps(props["target"])
         assert tool.annotations.destructiveHint is True
+
+
+class TestPatchNoteChildHeadings:
+    """Child-heading protection and `within`, end to end through MCP."""
+
+    @pytest.fixture
+    def note(self):
+        return FakeHeadingNote("doc.md", "# Doc\n\nintro\n\n- one\n\n## Child\n\nchild body\n")
+
+    @pytest.fixture
+    def vault_handlers(self, note):
+        return {"v": note.handler}
+
+    @staticmethod
+    def _args(**kwargs):
+        return {
+            "vault": "v",
+            "path": "doc.md",
+            "operation": "replace",
+            "target_type": "heading",
+            "target": "Doc",
+            "content": "new intro",
+            **kwargs,
+        }
+
+    async def test_replace_with_children_is_refused(self, mcp_client, note):
+        with pytest.raises(ToolError, match="refusing to replace heading 'Doc'"):
+            await _call(mcp_client, "patch_note", self._args())
+        assert "## Child\n\nchild body" in note.markdown
+
+    async def test_within_reaches_the_plugin(self, mcp_client, note):
+        await _call(
+            mcp_client,
+            "patch_note",
+            self._args(operation="append", content="\n- two", within=-1),
+        )
+        assert note.markdown == "# Doc\n\nintro\n\n- one\n- two\n\n## Child\n\nchild body\n"
+
+    async def test_replace_children_reaches_the_client(self, mcp_client, note):
+        await _call(mcp_client, "patch_note", self._args(replace_children=True))
+        assert note.markdown == "# Doc\n\nnew intro\n"
+
+    @pytest.mark.parametrize("bad", [{"within": "1"}, {"within": True}, {"within": 1.5}])
+    async def test_within_must_be_a_real_int(self, mcp_client, note, bad):
+        with pytest.raises(ToolError):
+            await _call(mcp_client, "patch_note", self._args(**bad))
+        assert note.requests == []
+
+    async def test_schema_lists_new_parameters(self, mcp_client):
+        tool = next(t for t in await mcp_client.list_tools() if t.name == "patch_note")
+        props = tool.inputSchema["properties"]
+        assert "integer" in json.dumps(props["within"])
+        assert props["replace_children"]["type"] == "boolean"
+
+
+class TestToolDescriptions:
+    """Claude Code truncates a tool description at 2KB before the model sees
+    it (obsidian-local-rest-api#295). Past the cut, rules are silently lost:
+    patch_note's whole operations section once was. Detail that doesn't fit
+    belongs in parameter descriptions, which aren't truncated."""
+
+    CLAUDE_CODE_DESCRIPTION_LIMIT = 2048
+
+    async def test_every_tool_description_fits(self, mcp_client):
+        too_long = {
+            tool.name: len(tool.description or "")
+            for tool in await mcp_client.list_tools()
+            if len(tool.description or "") > self.CLAUDE_CODE_DESCRIPTION_LIMIT
+        }
+        assert too_long == {}
+
+    async def test_patch_note_critical_rules_are_in_the_description(self, mcp_client):
+        tool = next(t for t in await mcp_client.list_tools() if t.name == "patch_note")
+        for rule in ("full path from the document root", "relative to the target", "refused"):
+            assert rule in tool.description
+        for param in ("within", "replace_children"):
+            assert param in tool.description
+
+    async def test_every_patch_note_parameter_is_described(self, mcp_client):
+        tool = next(t for t in await mcp_client.list_tools() if t.name == "patch_note")
+        props = tool.inputSchema["properties"]
+        assert [name for name, schema in props.items() if not schema.get("description")] == []
 
 
 class TestPatchNoteFrontmatter:

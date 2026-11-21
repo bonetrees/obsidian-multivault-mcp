@@ -47,7 +47,7 @@ tests/
 ├── test_main.py         # CLI helpers (_env_int, _parse_args, _strip_host_brackets) and main() integration
 ├── test_curators.py
 ├── test_client.py       # httpx.MockTransport
-├── plugin_fakes.py      # Stateful plugin fakes: FakeVaultNote (ETag / If-Match), FakeFrontmatterNote (v2 frontmatter merge rules)
+├── plugin_fakes.py      # Stateful plugin fakes: FakeVaultNote (ETag / If-Match), FakeFrontmatterNote (v2 frontmatter merge rules), FakeHeadingNote (subtree replace, Within, document map)
 └── test_tools.py        # FastMCP Client(mcp) integration
 ```
 
@@ -105,6 +105,8 @@ Transport errors are caught in `_request()` and mapped to `ToolError`.
 | HTTP 400 + `errorCode: 40080` | `_raise_for_status` | `ToolError`: invalid PATCH target (+ `hint` when the caller passed one) |
 | HTTP 400 + `errorCode: 40082/40083/40084` | `_raise_for_status` | `ToolError`: "PATCH protocol mismatch" — client/plugin disagree on the markdown-patch format. Names the version header we send; check the plugin version |
 | HTTP 409 (patch) | `_raise_for_status` (generic) | `ToolError`: content preexists / frontmatter key collision |
+| HTTP 404 / `40400` on a `within` PATCH | `_raise_for_status` + `WITHIN_TARGET_HINT` | `NotFound`: the note is missing (bare "Not Found"), the heading didn't match ("could not resolve heading target"), or the index is out of range (names the block count). The hint names all three and carries both the full-path and the block-index advice, so a wrong heading never gets only block-index advice |
+| Heading `replace` on a heading with children | `_refuse_child_loss` (client-side) | `ToolError`, nothing sent: names the children and points at `within`, a child target, or `replace_children=True` |
 | HTTP 404 on a frontmatter PATCH | `_raise_for_status` + `FRONTMATTER_TARGET_HINT` | `NotFound`: the *key* is absent (plugin: "could not resolve frontmatter target"); hint names `create_if_missing=True` |
 | HTTP 400 + `errorCode: 40081` | `_raise_for_status` (generic) | `ToolError`: invalid patch instruction, e.g. a payload on a delete, or an operation × scope × target-type combination the plugin doesn't support. `_check_patch_args` refuses the ones we know of before sending |
 | HTTP 400 + `errorCode: 40059` | `_raise_for_status` (generic) | `ToolError`: invalid `Target-Scope` value. Unreachable through the tool, which only sends values from `_DELETE_SCOPE_WIRE` |
@@ -146,6 +148,14 @@ Under v2 an unmatched heading comes back as **404** (`TargetNotFoundError`), not
 - **Root hazard:** a heading `Target` of `[]` addresses the *document root*, so a delete there wipes the body. A `::` string can never split to `[]`, but a list target could. `HeadingSegments` and `_check_patch_args` both refuse an empty list. Keep both.
 - `Create-Target-If-Missing` never applies to delete, so a missing target is always 404.
 - The plugin's own HTTP DELETE on a path-element URL returns 405 advising "PATCH with Operation: replace and an empty body". **That advice is wrong under v2:** replace with no payload is 40081. Use `Operation: delete`.
+
+### Heading replace and child headings
+
+Probed live on 5.5.2. A heading's `content` scope (what append/prepend/replace use) is its **whole subtree**, so a `replace` on a parent deletes every child heading and its body, with `200` and no warning. Under an h1 that's usually the whole document. The plugin owns this and will never refuse it, so the client does:
+
+- **A heading `replace` without `within` is refused when the target has children**, unless `replace_children=True`. `_refuse_child_loss` fetches the v2 document map (`GET` with `Accept: application/vnd.olrapi.document-map+json`, a nested heading tree like `{"Doc": {"Child": {}}}`) and walks it by segment. A heading missing from the map is let through, so the PATCH reports the miss with its usual 404 and hint. Repeated headings' map keys carry an opaque non-printable suffix, stripped for the error message. The GET is skipped with `within` or `replace_children=True`. There's a small window between the GET and the PATCH. It guards against caller mistakes, not concurrent edits (`if_match` covers those).
+- **`within: int` sends the `Within` header**: an index into the heading's intro blocks, the top-level blocks *above its first child heading* (`0` first, `-1` last). It works with header targeting, not only URL targeting. With the default `content` scope, `replace` swaps that block and `append`/`prepend` splice literally onto its end/start (`"\n- item"` extends a list), and children are never touched. Out of range is `404`/`40400` naming the block count, including on a heading with no intro text. Heading targets and append/prepend/replace only; never sent with a `Target-Scope`.
+- The `heading-level-not-relative` warning is skipped for `within` edits: they're literal splices, so the relative-level rule doesn't apply.
 
 ### Path-element targeting: considered and declined
 
@@ -199,7 +209,7 @@ Both `append_note` (POST) and `patch_note` with `operation: "append"` do not add
 
 All client tests use `httpx.MockTransport`. Each REST API method gets its own mock handler matching the method + path pattern. For multi-vault tests, create separate mock transports per vault.
 
-**A mock that returns `200` for everything is worse than no test.** The patch handlers used to do exactly that, asserting nothing about required headers — so the suite stayed fully green while every live `patch_note` call was failing with `40084`. Where a request has a contract the plugin actually enforces, the mock must enforce it too: `tests/test_client.py::markdown_patch_v2_handler` rejects what the real plugin rejects (missing/invalid version header, a heading `Target` that isn't a JSON array, v1-only headers under v2) and all PATCH success-path tests route through it. `test_contract_handler_rejects_nonconformant_requests` guards the guard, so it can't quietly go permissive. The same goes for preconditions: `tests/plugin_fakes.py::FakeVaultNote` keeps real note state, computes content-derived tags, serves only a weak tag on note+json, and refuses stale / malformed / weak `If-Match` exactly as the plugin does. `TestPreconditionFake` guards it. Likewise `FakeFrontmatterNote` holds real frontmatter and applies the plugin's merge, not-mergeable and missing-key rules, so a list sent as a JSON *string* lands as a string there too. `TestFrontmatterFake` guards it.
+**A mock that returns `200` for everything is worse than no test.** The patch handlers used to do exactly that, asserting nothing about required headers — so the suite stayed fully green while every live `patch_note` call was failing with `40084`. Where a request has a contract the plugin actually enforces, the mock must enforce it too: `tests/test_client.py::markdown_patch_v2_handler` rejects what the real plugin rejects (missing/invalid version header, a heading `Target` that isn't a JSON array, v1-only headers under v2) and all PATCH success-path tests route through it. `test_contract_handler_rejects_nonconformant_requests` guards the guard, so it can't quietly go permissive. The same goes for preconditions: `tests/plugin_fakes.py::FakeVaultNote` keeps real note state, computes content-derived tags, serves only a weak tag on note+json, and refuses stale / malformed / weak `If-Match` exactly as the plugin does. `TestPreconditionFake` guards it. Likewise `FakeFrontmatterNote` holds real frontmatter and applies the plugin's merge, not-mergeable and missing-key rules, so a list sent as a JSON *string* lands as a string there too. `TestFrontmatterFake` guards it. `FakeHeadingNote` holds a real note and replaces a heading's whole subtree, applies `Within` to intro blocks only, and serves the document map, so a client that skipped the child check would lose the children there too. `TestHeadingFake` guards it. `markdown_patch_v2_handler` answers document-map GETs itself (empty tree by default; pass `document_map_factory`), so record requests *outside* it when a test needs to see those GETs.
 
 ## Manual Smoke Checklist
 
@@ -215,6 +225,7 @@ The automated test suite mocks every HTTP exchange. A handful of assumptions are
 5. **`patch_note`** with `target_type="heading"`, `target="Parent::Child"` — confirm the right heading is targeted. This exercises the markdown-patch v2 `Target` round-trip (`::` path → JSON array → percent-encoded → plugin decodes and matches structurally), the single most fragile contract point in the client. Then repeat for `target_type="block-reference"` and `target_type="frontmatter-key"`, each with `append` / `prepend` / `replace` — the version header and target encoding are shared by all nine combinations, so a v2 regression can hide in any of them.
    **Then structured frontmatter:** `value=["a","b"]` on `tags` → `read_note` shows a real list. Append/prepend a list and an object, checking which side wins on prepend. `value=2` / `value=true` come back as int / bool, while `content="1.0"`, `"true"` and `"null"` still come back as strings. A list-shaped `content` is refused and pointed at `value`. A missing key 404s with the `create_if_missing` hint, and `create_if_missing=True` creates it, even on a note with no frontmatter block.
    **Then delete:** run each `delete_scope` on a heading with a child (the sibling must survive `"all"`), on a block, and on a frontmatter key. Deleting the last frontmatter key should remove the `---` block, and `marker` on frontmatter should be refused. A heading whose text contains `::` should be unreachable as a string but reachable as a list target, for both append and delete.
+   **Then child headings:** on `# Doc` (intro paragraph + list) → `### Child` → `## Sib`, a plain `replace` on `Doc` must be refused with the note untouched. `within=0` replace, `within=-1` append (`"\n- item"`) and `within=1` prepend must edit only the intro, leaving both children. `within=7` must 404 naming the block count, and `replace_children=True` must replace everything.
    **Also re-check the plugin version** (`manifest.json` in the vault's `.obsidian/plugins/obsidian-local-rest-api/`). The docs are written against **5.5.2**; a bump is the single likeliest cause of a sudden patch failure, and the plugin's own error text is the best source for what changed.
 6. **`write_note`** then **`append_note`** then **`delete_note`** — full destructive round-trip against a throwaway file. Confirm `delete_note` actually requires `confirm: true` (Pydantic schema should still accept `confirm: false` and the runtime gate should reject).
    **Then preconditions:** `read_note` → confirm `etag` equals the plugin's own `ETag` from a HEAD and is not `W/`-prefixed. For each of the four write tools: `read_note`, edit the note out of band (raw PUT, or type in Obsidian), then call the tool with the stale `if_match` → it must fail with "Precondition failed" and leave the edit intact. Also `write_note(create_only=True)` against an existing note → "already exists", untouched.
@@ -230,7 +241,7 @@ If any of these diverges from the docs, the mock-based tests are lying. Open an 
 1. Create `src/obsidian_multivault_mcp/tools/new_tool.py`
 2. Import `mcp`, `get_client` from `..server` and types from `..validation_types`
 3. Write `curate_new_result(raw: dict) -> dict` — handle timestamp conversion, field renames, frontmatter stripping if applicable. Reuse helpers from `tools/_helpers.py` (`strip_frontmatter`, `epoch_ms_to_iso`, `curate_simple_match`, `curate_structured_match`).
-4. Write `@mcp.tool(annotations={...}, tags={...})` async function with `Annotated` params and an LLM-facing docstring. Let `ToolError` propagate from the client layer.
+4. Write `@mcp.tool(annotations={...}, tags={...})` async function with `Annotated` params and an LLM-facing docstring. Keep the docstring under 2KB, with detail in parameter descriptions (see Code Style). Let `ToolError` propagate from the client layer.
 5. Add a client method to `client.py` — per-endpoint pattern.
 6. **No edits to `tools/__init__.py` needed** — `pkgutil.iter_modules()` auto-discovers any non-`_`-prefixed module at import time.
 7. Add tests: curator in `test_curators.py`, integration in `test_tools.py` using the `mcp_client` + `vault_handlers` fixtures from `conftest.py`.
@@ -241,6 +252,7 @@ If any of these diverges from the docs, the mock-based tests are lying. Open an 
 - Python 3.13, type hints on all functions
 - Black + Pylint
 - LLM-facing docstrings on all tools (written for tool discovery, not developers)
+- **Tool docstrings stay under 2KB.** Claude Code truncates tool descriptions at 2KB before the model sees them, so anything past the cut is silently lost (`patch_note`'s whole operations section once was). Put the rules a caller must not miss first, and per-parameter detail in `Annotated[..., Field(description=...)]`, which isn't truncated. `tests/test_tools.py::TestToolDescriptions` enforces the limit for every tool.
 - Logging: `%s` lazy formatting, stderr, `setup_logging("obsidian-multivault-mcp.module")`
 - `ToolError` for all failures, never `{"error": ...}` dicts
 - One tool per file in `tools/`
