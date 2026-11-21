@@ -111,13 +111,19 @@ async def patch_note(
     Mixed types (e.g. a string onto a list) are refused — use `replace`
     to change a value's type.
 
-    The response carries a `warnings` list. It is normally empty; a
-    non-empty entry means the patch **was applied** but something about
-    the result is worth knowing (e.g. a created heading nested deeper
-    than Markdown's six levels, usually from absolute `#` counts in
-    `content`, which leaves it unaddressable by later `heading`
-    patches). Warnings are not failures — a failed patch
-    raises instead.
+    The response carries a `warnings` list of `{code, message}` entries.
+    It is normally empty; a non-empty entry means the patch **was
+    applied** but something about the result is worth knowing:
+
+    - `heading-depth-overflow` (from the plugin): a heading in `content`
+      landed deeper than Markdown's six levels, which leaves it
+      unaddressable by later `heading` patches.
+    - `heading-level-not-relative` (from this server): the shallowest
+      heading in `content` has two or more `#`s, so it probably copied
+      the note's absolute level and landed too deep. Check the note and
+      fix the heading.
+
+    Warnings are not failures — a failed patch raises instead.
 
     Pass `if_match` (the `etag` from `read_note`, or from this tool's
     previous result) to make the write conditional: if the note has

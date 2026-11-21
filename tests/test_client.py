@@ -648,6 +648,115 @@ class TestPatchNote:
             )
         assert warnings == advisories
 
+    @pytest.mark.parametrize(
+        "content",
+        [
+            "\n# Details\n",
+            "\n# Details\n\n## Sub\n",
+            "\nplain body, no headings\n",
+            "\n```md\n### Foo\n```\n",
+            "\n~~~\n### Foo\n~~~\n",
+            "\n#hashtag, not a heading\n",
+        ],
+    )
+    async def test_relative_heading_content_is_not_warned(self, content):
+        async with make_client(markdown_patch_v2_handler()) as client:
+            warnings, _etag = await client.patch_note(
+                "doc.md",
+                operation="append",
+                target_type="heading",
+                target="Report::Findings",
+                content=content,
+            )
+        assert warnings == []
+
+    @pytest.mark.parametrize("operation", ["append", "prepend", "replace"])
+    async def test_absolute_heading_content_is_warned(self, operation):
+        # Verified live: all three operations rebase headings in content by
+        # the target's level, so `###` under an h3 silently lands at h6.
+        async with make_client(markdown_patch_v2_handler()) as client:
+            warnings, _etag = await client.patch_note(
+                "doc.md",
+                operation=operation,
+                target_type="heading",
+                target="Report::Findings",
+                content="\n### Details\n\nbody\n",
+            )
+        assert len(warnings) == 1
+        assert warnings[0]["code"] == "heading-level-not-relative"
+        message = warnings[0]["message"]
+        assert '"Details"' in message
+        assert '3 "#"s' in message
+        assert "Report::Findings" in message
+        assert "direct child" in message
+
+    async def test_heading_level_warning_uses_shallowest_heading_outside_fences(self):
+        content = "\n```\n# in a fence\n```\n\n#### Deep\n\n## Shallow\n"
+        async with make_client(markdown_patch_v2_handler()) as client:
+            warnings, _etag = await client.patch_note(
+                "doc.md",
+                operation="append",
+                target_type="heading",
+                target=["Report", "Q1::Q2"],
+                content=content,
+            )
+        assert [w["code"] for w in warnings] == ["heading-level-not-relative"]
+        assert '"Shallow"' in warnings[0]["message"]
+        assert "Report::Q1::Q2" in warnings[0]["message"]
+
+    async def test_plugin_and_client_heading_warnings_both_returned(self):
+        advisories = [
+            {
+                "code": "heading-depth-overflow",
+                "message": 'Created heading "Overflow" resolves to level 8.',
+            }
+        ]
+
+        def record(_request):
+            return httpx.Response(
+                200,
+                headers={"Markdown-Patch-Warnings": urllib.parse.quote(json.dumps(advisories))},
+            )
+
+        async with make_client(markdown_patch_v2_handler(record)) as client:
+            warnings, _etag = await client.patch_note(
+                "doc.md",
+                operation="append",
+                target_type="heading",
+                target="Report::Findings::Details",
+                content="\n#### Overflow\n",
+            )
+        assert [w["code"] for w in warnings] == [
+            "heading-depth-overflow",
+            "heading-level-not-relative",
+        ]
+        assert warnings[0] == advisories[0]
+
+    @pytest.mark.parametrize(
+        "target_type, target",
+        [("frontmatter-key", "notes"), ("block-reference", "abc123")],
+    )
+    async def test_non_heading_targets_never_get_heading_level_warning(self, target_type, target):
+        async with make_client(markdown_patch_v2_handler()) as client:
+            warnings, _etag = await client.patch_note(
+                "doc.md",
+                operation="replace",
+                target_type=target_type,
+                target=target,
+                content="### Not a relative heading",
+            )
+        assert warnings == []
+
+    async def test_delete_never_gets_heading_level_warning(self):
+        async with make_client(markdown_patch_v2_handler()) as client:
+            warnings, _etag = await client.patch_note(
+                "doc.md",
+                operation="delete",
+                target_type="heading",
+                target="Report::Findings",
+            )
+        assert warnings == []
+
     @pytest.mark.parametrize("raw", ["not-json", "%7Bnope", urllib.parse.quote('{"a":1}')])
     async def test_unparseable_warnings_header_is_dropped_not_raised(self, raw):
         # Warnings are advisory and arrive on the success path — the write
