@@ -529,13 +529,22 @@ class ObsidianVaultClient:
     # frontmatter block at all, which it creates).
     CREATE_TARGET_HEADER = "Create-Target-If-Missing"
 
-    # Tool-facing delete scope → v2 Target-Scope. Sent for deletes only, so
-    # every other operation keeps its exact pre-delete wire shape. "all" is
+    # Tool-facing delete scope → v2 Target-Scope. Sent only for deletes and
+    # the sibling inserts below, so every other operation keeps its exact
+    # pre-delete wire shape. "all" is
     # the tool default because the plugin's own default (content) is the
     # surprising one: it leaves `key: null` behind on frontmatter and, on a
     # heading, keeps the heading line while deleting its body AND children.
     TARGET_SCOPE_HEADER = "Target-Scope"
     _DELETE_SCOPE_WIRE = {"all": "markerAndContent", "content": "content", "marker": "marker"}
+
+    # Sibling inserts → v2 append/prepend at markerAndContent scope, which
+    # inserts a new section after the target's whole subtree (append) or
+    # before its heading line (prepend). The content is rebased by the
+    # *parent's* level, so `#` lands at the target's own level. A heading
+    # append/replace can only ever produce children, so this is the one way
+    # to add a sibling section without rewriting the note.
+    _INSERT_WIRE = {"insert_after": "append", "insert_before": "prepend"}
 
     # Splices the edit into one of a heading's intro blocks: the top-level
     # blocks above its first child heading (0 = first, -1 = last). Verified
@@ -694,37 +703,23 @@ class ObsidianVaultClient:
         # else so the tool layer always hands back a uniform list of dicts.
         return [entry if isinstance(entry, dict) else {"message": str(entry)} for entry in parsed]
 
-    # Client-side counterpart to the plugin's heading-depth-overflow notice.
-    HEADING_LEVEL_WARNING_CODE = "heading-level-not-relative"
     _ATX_HEADING = re.compile(r"^ {0,3}(#{1,6})[ \t]+(.*?)[ \t]*$")
     _CODE_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+    # Same shape the read_note curator strips: a leading YAML block, whose
+    # `# comment` lines must not be mistaken for headings.
+    _FRONTMATTER = re.compile(r"^---\r?\n(?:.*?\r?\n)?---(?:\r?\n|\Z)", re.DOTALL)
+    MAX_HEADING_LEVEL = 6
 
     @classmethod
-    def _heading_level_warnings(
-        cls, wire_target_type: str, target: str | list[str], content: str | None
-    ) -> list[dict]:
-        """Flag heading content that looks absolute rather than relative.
+    def _atx_headings(cls, markdown: str) -> list[tuple[int, str]]:
+        """(level, text) of each ATX heading outside fenced code, in order.
 
-        v2 rebases every heading in a heading target's content by the
-        target's level (verified live for append, prepend and replace): `#`
-        is a direct child. A correct relative fragment therefore starts at
-        `#`, while a `#` count copied from the note is always 2 or more,
-        since no child heading is shallower than h2. So the shallowest
-        heading having 2+ `#`s is the signal. That needs no knowledge of
-        the target's real level, which the path can't give: notes skip
-        levels, so segment count is only a lower bound.
-
-        The plugin only warns once a heading is pushed past h6, so in a
-        shallow note the mistake is otherwise silent. Advisory only: the
-        write has already happened by the time this runs. Only heading
-        targets carrying `content` are checked, which excludes deletes.
+        Setext headings aren't recognised. Callers treat a miss as "unknown"
+        and let the plugin decide, never as a reason to refuse.
         """
-        if wire_target_type != "heading" or content is None:
-            return []
+        headings = []
         fence: str | None = None
-        # One past h6 means "no heading seen yet".
-        level, text = 7, ""
-        for line in content.splitlines():
+        for line in markdown.splitlines():
             fence_match = cls._CODE_FENCE.match(line)
             if fence_match:
                 marker = fence_match.group(1)
@@ -736,22 +731,153 @@ class ObsidianVaultClient:
             if fence is not None:
                 continue
             heading = cls._ATX_HEADING.match(line)
-            if heading and len(heading.group(1)) < level:
-                level, text = len(heading.group(1)), heading.group(2).rstrip("#").rstrip()
-        if not 2 <= level <= 6:
-            return []
-        path = cls.HEADING_PATH_DELIMITER.join(target) if isinstance(target, list) else target
-        return [
-            {
-                "code": cls.HEADING_LEVEL_WARNING_CODE,
-                "message": (
-                    f'Heading "{text}" in content was written with {level} "#"s, so it '
-                    f'landed {level} levels below "{path}". Heading levels in content '
-                    f'are relative to the target: "#" means a direct child. If you '
-                    f"copied the level from the note, fix the heading."
-                ),
-            }
-        ]
+            if heading:
+                headings.append((len(heading.group(1)), heading.group(2).rstrip("#").rstrip()))
+        return headings
+
+    async def _target_levels(self, path: str, target: str | list[str]) -> tuple[int, int] | None:
+        """(target level, parent level) of a heading target, read from the note.
+
+        The document map carries no levels, and segment count is only a
+        lower bound because notes skip levels, so this reads the markdown.
+        None when the path doesn't match an ATX heading (a setext heading,
+        say): the PATCH then goes ahead and the plugin's own
+        heading-depth-overflow warning is the backstop.
+        """
+        response = await self._request(
+            "GET",
+            f"/vault/{self._encode_path(path)}",
+            operation="patch_note",
+            headers={"Accept": "text/markdown"},
+        )
+        self._raise_for_status(response, "patch_note", path)
+        segments = self._heading_segments(target)
+        stack: list[tuple[int, str]] = []
+        for level, text in self._atx_headings(self._FRONTMATTER.sub("", response.text, count=1)):
+            while stack and stack[-1][0] >= level:
+                stack.pop()
+            stack.append((level, text))
+            if [t for _, t in stack] == segments:
+                return level, stack[-2][0] if len(stack) > 1 else 0
+        return None
+
+    async def _check_heading_patch(
+        self,
+        path: str,
+        operation: str,
+        target: str | list[str],
+        content: str,
+        replace_children: bool,
+        allow_deep_headings: bool,
+    ) -> None:
+        """Client-side refusals for a heading write with content, before any PATCH.
+
+        v2 rebases every heading in a heading target's content (verified
+        live): by the target's level for append/prepend/replace, so `#` is
+        a direct child, and by the parent's level for the sibling inserts,
+        so `#` is a section beside the target. Content whose levels look
+        absolute, or would land past h6, used to get an advisory warning,
+        but that arrived after the bad heading was written and the repair
+        was a whole-note rewrite. So both are refused instead, unless
+        allow_deep_headings is set. A heading replace that would delete
+        children is refused too — see _refuse_child_loss.
+        """
+        location = self._format_location(path)
+        prefix = f"patch_note for vault '{self.name}'{location}:"
+        joined = self.HEADING_PATH_DELIMITER.join(self._heading_segments(target))
+        headings = self._atx_headings(content)
+        if not allow_deep_headings:
+            self._refuse_absolute_levels(prefix, joined, operation, headings)
+        if operation in self._INSERT_WIRE:
+            self._refuse_headless_insert(prefix, joined, operation, content)
+        if not allow_deep_headings and headings:
+            await self._refuse_heading_overflow(prefix, joined, path, operation, target, headings)
+        if operation == "replace" and not replace_children:
+            await self._refuse_child_loss(location, path, target)
+
+    def _refuse_absolute_levels(
+        self, prefix: str, joined: str, operation: str, headings: list[tuple[int, str]]
+    ) -> None:
+        """Refuse content whose shallowest heading has 2+ `#`s.
+
+        A correct relative fragment starts at `#`, while a `#` count copied
+        from the note is always 2 or more, since nothing below the root is
+        shallower than h2. That needs no knowledge of the target's level,
+        which the path can't give: notes skip levels. A relative `##` would
+        be a grandchild with no child between, a level skip that's rarely
+        meant; allow_deep_headings covers it when it is.
+        """
+        if not headings:
+            return
+        level, text = min(headings, key=lambda heading: heading[0])
+        if level < 2:
+            return
+        insert = operation in self._INSERT_WIRE
+        relation = "a section beside" if insert else "a direct child of"
+        sibling = (
+            ""
+            if insert
+            else f" To add a section at the same level as '{joined}', use "
+            "operation='insert_after' (or 'insert_before') with '# Title'."
+        )
+        raise ToolError(
+            f"{prefix} refusing: heading \"{text}\" in content has {level} '#'s. "
+            f"Heading levels in content are relative: '#' is {relation} '{joined}' "
+            "and each extra '#' goes one level deeper, so this looks copied from the "
+            "note's absolute levels. Nothing was written. Start the content's headings "
+            f"at '#'.{sibling} If the deeper level is intended, pass "
+            "allow_deep_headings=True."
+        )
+
+    def _refuse_headless_insert(
+        self, prefix: str, joined: str, operation: str, content: str
+    ) -> None:
+        """Refuse a sibling insert that doesn't open with a `#` heading line.
+
+        Without one, the text lands after the target's subtree (or before
+        its heading line) as plain body, silently joining whichever section
+        precedes it.
+        """
+        first = next((line for line in content.splitlines() if line.strip()), "")
+        opening = self._ATX_HEADING.match(first)
+        if opening is not None and len(opening.group(1)) == 1:
+            return
+        raise ToolError(
+            f"{prefix} {operation} adds a new section beside '{joined}', so content "
+            "must open with that section's heading line at '#' (e.g. "
+            "'# New entry\\n\\nbody'). Nothing was written. To add text inside "
+            f"'{joined}' instead, use append or prepend."
+        )
+
+    async def _refuse_heading_overflow(
+        self,
+        prefix: str,
+        joined: str,
+        path: str,
+        operation: str,
+        target: str | list[str],
+        headings: list[tuple[int, str]],
+    ) -> None:
+        """Refuse content with a heading that would land past h6.
+
+        Past h6 the line stops being a heading, so it can't be addressed
+        afterwards; the plugin only warns, after writing. This needs the
+        target's real level, so it costs one GET.
+        """
+        levels = await self._target_levels(path, target)
+        if levels is None:
+            return
+        deepest, text = max(headings, key=lambda heading: heading[0])
+        landed = (levels[1] if operation in self._INSERT_WIRE else levels[0]) + deepest
+        if landed <= self.MAX_HEADING_LEVEL:
+            return
+        raise ToolError(
+            f'{prefix} refusing: heading "{text}" in content would land at level '
+            f"{landed} ('{joined}' is an h{levels[0]}), past Markdown's maximum of "
+            f"{self.MAX_HEADING_LEVEL}, where it stops being a heading. Nothing was "
+            "written. Flatten the content's headings, or pass allow_deep_headings=True "
+            "to write it anyway."
+        )
 
     def _patch_body(
         self,
@@ -840,7 +966,7 @@ class ObsidianVaultClient:
     ) -> dict[str, Any]:
         """Headers and body for one PATCH, as keyword arguments for _request."""
         headers = {
-            "Operation": operation,
+            "Operation": self._INSERT_WIRE.get(operation, operation),
             "Target-Type": wire_target_type,
             "Target": self._encode_patch_target(wire_target_type, target),
             # Required: header targeting without an explicit version is
@@ -855,6 +981,8 @@ class ObsidianVaultClient:
             headers[self.CREATE_TARGET_HEADER] = "true"
         if operation == "delete":
             headers[self.TARGET_SCOPE_HEADER] = self._DELETE_SCOPE_WIRE[delete_scope or "all"]
+        elif operation in self._INSERT_WIRE:
+            headers[self.TARGET_SCOPE_HEADER] = "markerAndContent"
         if within is not None:
             headers[self.WITHIN_HEADER] = str(within)
         body = self._patch_body(headers, wire_target_type, location, target, content, value)
@@ -872,6 +1000,7 @@ class ObsidianVaultClient:
         delete_scope: str | None,
         within: int | None = None,
         replace_children: bool = False,
+        allow_deep_headings: bool = False,
     ) -> None:
         """Refuse argument combinations the plugin would reject or misread.
 
@@ -884,6 +1013,17 @@ class ObsidianVaultClient:
             raise ToolError(
                 f"{prefix} a list target is only for heading targets, and must name at "
                 "least one heading (an empty list would address the whole document)."
+            )
+        if operation in self._INSERT_WIRE and (wire_target_type != "heading" or within is not None):
+            raise ToolError(
+                f"{prefix} {operation} applies only to heading targets, without 'within'."
+            )
+        if allow_deep_headings and (
+            wire_target_type != "heading" or operation == "delete" or within is not None
+        ):
+            raise ToolError(
+                f"{prefix} allow_deep_headings applies only to heading targets with "
+                "content, without 'within' (a 'within' edit is never rebased)."
             )
         if within is not None and (wire_target_type != "heading" or operation == "delete"):
             raise ToolError(
@@ -931,6 +1071,7 @@ class ObsidianVaultClient:
         delete_scope: str | None = None,
         within: int | None = None,
         replace_children: bool = False,
+        allow_deep_headings: bool = False,
     ) -> tuple[list[dict], str | None]:
         """Apply one surgical edit; returns (advisory warnings, new etag).
 
@@ -946,11 +1087,15 @@ class ObsidianVaultClient:
         A heading ``replace`` is refused when the heading has children, unless
         ``replace_children`` is set — see _refuse_child_loss. ``within`` edits
         one intro block instead and never touches children — see WITHIN_HEADER.
+
+        ``insert_after``/``insert_before`` add a sibling section — see
+        _INSERT_WIRE. Heading content whose levels look absolute, or would
+        land past h6, is refused unless ``allow_deep_headings`` is set — see
+        _refuse_bad_heading_levels.
         """
         wire_target_type = self._TARGET_TYPE_WIRE.get(target_type, target_type)
-        location = self._format_location(path)
         self._check_patch_args(
-            location,
+            self._format_location(path),
             operation,
             target_type,
             target,
@@ -960,14 +1105,12 @@ class ObsidianVaultClient:
             delete_scope,
             within,
             replace_children,
+            allow_deep_headings,
         )
-        if (
-            wire_target_type == "heading"
-            and operation == "replace"
-            and within is None
-            and not replace_children
-        ):
-            await self._refuse_child_loss(location, path, target)
+        if wire_target_type == "heading" and within is None and content is not None:
+            await self._check_heading_patch(
+                path, operation, target, content, replace_children, allow_deep_headings
+            )
         response = await self._request(
             "PATCH",
             f"/vault/{self._encode_path(path)}",
@@ -975,7 +1118,7 @@ class ObsidianVaultClient:
             **self._patch_request(
                 operation,
                 wire_target_type,
-                location,
+                self._format_location(path),
                 target,
                 content,
                 value,
@@ -1000,16 +1143,7 @@ class ObsidianVaultClient:
                 "frontmatter": self.FRONTMATTER_TARGET_HINT,
             }.get(wire_target_type),
         )
-        # Plugin warnings first, then this client's own heading-level check.
-        # A `within` edit splices literally into one block, so the
-        # relative-level rule it checks doesn't apply there.
-        return (
-            self._parse_patch_warnings(response)
-            + self._heading_level_warnings(
-                wire_target_type, target, content if within is None else None
-            ),
-            self._etag(response),
-        )
+        return self._parse_patch_warnings(response), self._etag(response)
 
     async def delete_note(self, path: str, if_match: str | None = None) -> None:
         response = await self._request(

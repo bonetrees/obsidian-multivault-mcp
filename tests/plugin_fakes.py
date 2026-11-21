@@ -256,16 +256,20 @@ class FakeHeadingNote:
 
     - A heading's `content` scope is its whole subtree. replace swaps all of
       it, children included; append/prepend insert at the subtree's end/start.
+      Headings in the content are rebased by the target's level.
+    - ``Target-Scope: markerAndContent`` append/prepend is a sibling insert:
+      after the whole subtree, or before the heading line, with headings
+      rebased by the *parent's* level, so `#` lands beside the target.
     - ``Within: <int>`` addresses one of the heading's intro blocks: the
       top-level blocks above its first child heading (negative counts from
       the end). replace swaps that block, append/prepend splice onto its
       end/start literally, and children are never touched. Out of range is
       404 / 40400 naming the block count.
     - GET with the document-map Accept type returns the heading tree as
-      nested objects, e.g. {"Doc": {"Child": {}}}.
+      nested objects, e.g. {"Doc": {"Child": {}}}. GET with ``text/markdown``
+      returns the note itself.
 
-    Not modelled: heading-level rebasing of content, whitespace management,
-    duplicate headings. The note is a list of blank-line-separated chunks,
+    Not modelled: whitespace management, duplicate headings, frontmatter. The note is a list of blank-line-separated chunks,
     each either a heading line or a body block, so test notes must use one
     blank line between blocks. Route PATCHes through
     markdown_patch_v2_handler so the v2 header contract is enforced too.
@@ -279,15 +283,18 @@ class FakeHeadingNote:
         self.requests: list[httpx.Request] = []
 
     @staticmethod
-    def _parse(markdown: str) -> list[tuple[int, str]]:
-        """(level, text) per chunk; level 0 is a body block."""
+    def _parse(markdown: str, baseline: int = 0) -> list[tuple[int, str]]:
+        """(level, text) per chunk; level 0 is a body block.
+
+        Heading levels are shifted by ``baseline``, as v2 rebases content.
+        """
         items = []
         for chunk in (c.strip("\n") for c in markdown.split("\n\n")):
             if not chunk:
                 continue
             hashes = len(chunk) - len(chunk.lstrip("#"))
             if 1 <= hashes <= 6 and "\n" not in chunk and chunk[hashes : hashes + 1] == " ":
-                items.append((hashes, chunk[hashes + 1 :]))
+                items.append((hashes + baseline, chunk[hashes + 1 :]))
             else:
                 items.append((0, chunk))
         return items
@@ -331,6 +338,8 @@ class FakeHeadingNote:
             return httpx.Response(404, json={"errorCode": 40400, "message": "Not Found"})
         if request.method == "GET" and request.headers.get("accept") == self.DOCUMENT_MAP_ACCEPT:
             return httpx.Response(200, json=self.document_map())
+        if request.method == "GET" and request.headers.get("accept") == "text/markdown":
+            return httpx.Response(200, text=self.markdown)
         if request.method != "PATCH" or request.headers.get("target-type") != "heading":
             return httpx.Response(405, json={"errorCode": 40500, "message": "Not modelled"})
         segments = tuple(json.loads(urllib.parse.unquote(request.headers["target"])))
@@ -347,7 +356,18 @@ class FakeHeadingNote:
         content = request.content.decode("utf-8")
         if "within" in request.headers:
             return self._patch_within(request, head, end, operation, content, list(segments))
-        new_items = self._parse(content)
+        if request.headers.get("target-scope") == "markerAndContent":
+            if operation == "replace":
+                return httpx.Response(405, json={"errorCode": 40500, "message": "Not modelled"})
+            # Sibling insert, rebased by the parent's level (0 at the top).
+            parent = next(
+                (self.items[i][0] for i in range(head - 1, -1, -1) if 0 < self.items[i][0] < level),
+                0,
+            )
+            at = end if operation == "append" else head
+            self.items[at:at] = self._parse(content, parent)
+            return httpx.Response(200, text=self.markdown)
+        new_items = self._parse(content, level)
         if operation == "replace":
             self.items[head + 1 : end] = new_items
         elif operation == "append":
