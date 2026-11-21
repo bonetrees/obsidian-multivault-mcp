@@ -269,7 +269,7 @@ def document_map(headings=None):
     return {"version": "abc123", "frontmatterFields": [], "headings": headings or {}, "blocks": []}
 
 
-def markdown_patch_v2_handler(response_factory=None, document_map_factory=None):
+def markdown_patch_v2_handler(response_factory=None, document_map_factory=None, note_factory=None):
     """Build a handler that emulates obsidian-local-rest-api's PATCH contract.
 
     The point is to be *strict where the plugin is strict*. The mocks this
@@ -284,6 +284,11 @@ def markdown_patch_v2_handler(response_factory=None, document_map_factory=None):
     children, from ``document_map_factory()`` (e.g. a FakeHeadingNote's
     ``document_map``). Without one the tree is empty, so a replace sees a
     childless target.
+
+    Likewise it serves the note's markdown, which a heading write with
+    headings in its content reads for the target's level, from
+    ``note_factory()``. Without one the note is empty, so the target's level
+    is unknown and the overflow check stands aside.
     """
 
     def handler(request):
@@ -293,6 +298,8 @@ def markdown_patch_v2_handler(response_factory=None, document_map_factory=None):
         ):
             body = document_map_factory() if document_map_factory else document_map()
             return httpx.Response(200, json=body)
+        if request.method == "GET" and request.headers.get("accept") == "text/markdown":
+            return httpx.Response(200, text=note_factory() if note_factory else "")
         version = request.headers.get("markdown-patch-version")
         if version is None:
             # errorCode 40084: header targeting is ambiguous between the two
@@ -675,7 +682,7 @@ class TestPatchNote:
             "\n#hashtag, not a heading\n",
         ],
     )
-    async def test_relative_heading_content_is_not_warned(self, content):
+    async def test_relative_heading_content_is_sent(self, content):
         async with make_client(markdown_patch_v2_handler()) as client:
             warnings, _etag = await client.patch_note(
                 "doc.md",
@@ -686,41 +693,76 @@ class TestPatchNote:
             )
         assert warnings == []
 
-    @pytest.mark.parametrize("operation", ["append", "prepend", "replace"])
-    async def test_absolute_heading_content_is_warned(self, operation):
-        # Verified live: all three operations rebase headings in content by
-        # the target's level, so `###` under an h3 silently lands at h6.
-        async with make_client(markdown_patch_v2_handler()) as client:
-            warnings, _etag = await client.patch_note(
-                "doc.md",
-                operation=operation,
-                target_type="heading",
-                target="Report::Findings",
-                content="\n### Details\n\nbody\n",
-            )
-        assert len(warnings) == 1
-        assert warnings[0]["code"] == "heading-level-not-relative"
-        message = warnings[0]["message"]
-        assert '"Details"' in message
-        assert '3 "#"s' in message
-        assert "Report::Findings" in message
-        assert "direct child" in message
+    @pytest.mark.parametrize(
+        "operation", ["append", "prepend", "replace", "insert_after", "insert_before"]
+    )
+    async def test_absolute_heading_content_is_refused_before_sending(self, operation):
+        # Verified live: every operation rebases headings in content, so
+        # `###` under an h3 silently lands at h6. This used to be a warning
+        # that arrived after the write; now nothing is sent.
+        seen = []
 
-    async def test_heading_level_warning_uses_shallowest_heading_outside_fences(self):
+        def record(request):
+            seen.append(request)
+            return httpx.Response(200)
+
+        async with make_client(markdown_patch_v2_handler(record)) as client:
+            with pytest.raises(ToolError) as exc_info:
+                await client.patch_note(
+                    "doc.md",
+                    operation=operation,
+                    target_type="heading",
+                    target="Report::Findings",
+                    content="\n### Details\n\nbody\n",
+                )
+        message = str(exc_info.value)
+        assert "refusing" in message
+        assert '"Details"' in message
+        assert "3 '#'s" in message
+        assert "Report::Findings" in message
+        assert "Nothing was written" in message
+        assert "allow_deep_headings=True" in message
+        if operation.startswith("insert"):
+            assert "a section beside" in message
+        else:
+            assert "a direct child of" in message
+            assert "insert_after" in message
+        assert seen == []
+
+    async def test_absolute_level_refusal_uses_shallowest_heading_outside_fences(self):
         content = "\n```\n# in a fence\n```\n\n#### Deep\n\n## Shallow\n"
         async with make_client(markdown_patch_v2_handler()) as client:
-            warnings, _etag = await client.patch_note(
+            with pytest.raises(ToolError) as exc_info:
+                await client.patch_note(
+                    "doc.md",
+                    operation="append",
+                    target_type="heading",
+                    target=["Report", "Q1::Q2"],
+                    content=content,
+                )
+        assert '"Shallow"' in str(exc_info.value)
+        assert "Report::Q1::Q2" in str(exc_info.value)
+
+    async def test_allow_deep_headings_sends_without_reading_the_note(self):
+        seen = []
+        inner = markdown_patch_v2_handler()
+
+        def handler(request):
+            seen.append(request)
+            return inner(request)
+
+        async with make_client(handler) as client:
+            await client.patch_note(
                 "doc.md",
                 operation="append",
                 target_type="heading",
-                target=["Report", "Q1::Q2"],
-                content=content,
+                target="Report::Findings",
+                content="\n## Grandchild\n",
+                allow_deep_headings=True,
             )
-        assert [w["code"] for w in warnings] == ["heading-level-not-relative"]
-        assert '"Shallow"' in warnings[0]["message"]
-        assert "Report::Q1::Q2" in warnings[0]["message"]
+        assert [r.method for r in seen] == ["PATCH"]
 
-    async def test_plugin_and_client_heading_warnings_both_returned(self):
+    async def test_plugin_warnings_returned_alone(self):
         advisories = [
             {
                 "code": "heading-depth-overflow",
@@ -741,18 +783,15 @@ class TestPatchNote:
                 target_type="heading",
                 target="Report::Findings::Details",
                 content="\n#### Overflow\n",
+                allow_deep_headings=True,
             )
-        assert [w["code"] for w in warnings] == [
-            "heading-depth-overflow",
-            "heading-level-not-relative",
-        ]
-        assert warnings[0] == advisories[0]
+        assert warnings == advisories
 
     @pytest.mark.parametrize(
         "target_type, target",
         [("frontmatter-key", "notes"), ("block-reference", "abc123")],
     )
-    async def test_non_heading_targets_never_get_heading_level_warning(self, target_type, target):
+    async def test_non_heading_targets_are_never_level_checked(self, target_type, target):
         async with make_client(markdown_patch_v2_handler()) as client:
             warnings, _etag = await client.patch_note(
                 "doc.md",
@@ -763,7 +802,7 @@ class TestPatchNote:
             )
         assert warnings == []
 
-    async def test_delete_never_gets_heading_level_warning(self):
+    async def test_delete_is_never_level_checked(self):
         async with make_client(markdown_patch_v2_handler()) as client:
             warnings, _etag = await client.patch_note(
                 "doc.md",
@@ -2287,7 +2326,7 @@ class TestPatchChildHeadings:
         assert ("reaches only the first" in message) is reach_note
         assert "\u2063" not in message
 
-    async def test_heading_level_warning_skipped_for_within(self):
+    async def test_heading_level_check_skipped_for_within(self):
         note = FakeHeadingNote("doc.md", PARENT_WITH_CHILDREN)
         async with self._client(note, []) as client:
             warnings, _etag = await client.patch_note(
@@ -2336,6 +2375,353 @@ class TestPatchChildHeadings:
         }
         if args["operation"] == "delete":
             args.pop("content")
+        async with make_client(handler) as client:
+            with pytest.raises(ToolError, match=fragment):
+                await client.patch_note("doc.md", **args)
+        assert seen == []
+
+
+# h1 → h5 chain, each with a body, so a write under "E" starts at h5.
+DEEP_NOTE = "# A\n\n## B\n\n### C\n\n#### D\n\n##### E\n\ne body\n"
+LOG_NOTE = (
+    "# Log\n\n## Decisions\n\n### Entry one\n\none body\n\n#### Follow-up\n\nfollow body\n\n"
+    "### Entry two\n\ntwo body\n"
+)
+
+
+class TestHeadingFakeSiblings:
+    """Guard the guard: sibling inserts and rebasing as the plugin does them."""
+
+    _patch = staticmethod(TestHeadingFake._patch)
+
+    def test_content_scope_append_lands_after_last_child_rebased_by_target(self):
+        note = FakeHeadingNote("doc.md", LOG_NOTE)
+        self._patch(note, "append", ["Log", "Decisions", "Entry one"], "# Note")
+        assert "#### Follow-up\n\nfollow body\n\n#### Note\n\n### Entry two" in note.markdown
+
+    def test_marker_and_content_append_inserts_sibling_after_subtree(self):
+        note = FakeHeadingNote("doc.md", LOG_NOTE)
+        response = self._patch(
+            note,
+            "append",
+            ["Log", "Decisions", "Entry one"],
+            "# Entry new\n\nnew body",
+            **{"Target-Scope": "markerAndContent"},
+        )
+        assert response.status_code == 200
+        assert "follow body\n\n### Entry new\n\nnew body\n\n### Entry two" in note.markdown
+
+    def test_marker_and_content_prepend_inserts_sibling_before_heading(self):
+        note = FakeHeadingNote("doc.md", LOG_NOTE)
+        self._patch(
+            note,
+            "prepend",
+            ["Log", "Decisions", "Entry two"],
+            "# Entry new",
+            **{"Target-Scope": "markerAndContent"},
+        )
+        assert "follow body\n\n### Entry new\n\n### Entry two" in note.markdown
+
+    def test_serves_markdown(self):
+        note = FakeHeadingNote("doc.md", LOG_NOTE)
+        with httpx.Client(transport=httpx.MockTransport(note.handler)) as http:
+            response = http.get("http://x/vault/doc.md", headers={"Accept": "text/markdown"})
+        assert response.text == LOG_NOTE
+
+
+class TestSiblingInsertAndOverflow:
+    """insert_after / insert_before, and refusing headings past h6."""
+
+    @staticmethod
+    def _client(note, seen):
+        inner = markdown_patch_v2_handler(
+            note.handler,
+            document_map_factory=note.document_map,
+            note_factory=lambda: note.markdown,
+        )
+
+        def handler(request):
+            seen.append(request)
+            return inner(request)
+
+        return make_client(handler)
+
+    @pytest.mark.parametrize(
+        "operation, wire", [("insert_after", "append"), ("insert_before", "prepend")]
+    )
+    async def test_insert_wire_shape(self, operation, wire):
+        seen = {}
+
+        def record(request):
+            seen.update(request.headers)
+            seen["body"] = request.content
+            return httpx.Response(200)
+
+        async with make_client(markdown_patch_v2_handler(record)) as client:
+            await client.patch_note(
+                "doc.md",
+                operation=operation,
+                target_type="heading",
+                target="Log::Decisions::Entry one",
+                content="# Entry new\n\nbody\n",
+            )
+        assert seen["operation"] == wire
+        assert seen["target-scope"] == "markerAndContent"
+        assert seen["content-type"] == "text/markdown"
+        assert seen["body"] == b"# Entry new\n\nbody\n"
+
+    @pytest.mark.parametrize("operation", ["append", "prepend", "replace"])
+    async def test_other_writes_send_no_target_scope(self, operation):
+        seen = {}
+
+        def record(request):
+            seen.update(request.headers)
+            return httpx.Response(200)
+
+        async with make_client(markdown_patch_v2_handler(record)) as client:
+            await client.patch_note(
+                "doc.md",
+                operation=operation,
+                target_type="heading",
+                target="Doc",
+                content="x",
+                replace_children=operation == "replace",
+            )
+        assert "target-scope" not in seen
+
+    async def test_insert_after_on_h3_with_children_lands_after_last_child(self):
+        note = FakeHeadingNote("doc.md", LOG_NOTE)
+        async with self._client(note, []) as client:
+            await client.patch_note(
+                "doc.md",
+                operation="insert_after",
+                target_type="heading",
+                target="Log::Decisions::Entry one",
+                content="# Entry new\n\nnew body",
+            )
+        assert "follow body\n\n### Entry new\n\nnew body\n\n### Entry two" in note.markdown
+        assert note.document_map()["headings"]["Log"]["Decisions"] == {
+            "Entry one": {"Follow-up": {}},
+            "Entry new": {},
+            "Entry two": {},
+        }
+
+    @pytest.mark.parametrize(
+        "content",
+        ["plain text, no heading\n", "\nbody first\n\n# Later\n", "## Not h1\n\n# Then h1\n"],
+    )
+    @pytest.mark.parametrize("allow", [False, True])
+    async def test_insert_content_must_open_with_h1(self, content, allow):
+        note = FakeHeadingNote("doc.md", LOG_NOTE)
+        seen = []
+        async with self._client(note, seen) as client:
+            with pytest.raises(ToolError, match="must open with that section's heading"):
+                await client.patch_note(
+                    "doc.md",
+                    operation="insert_after",
+                    target_type="heading",
+                    target="Log::Decisions::Entry one",
+                    content=content,
+                    allow_deep_headings=allow,
+                )
+        assert "PATCH" not in [r.method for r in seen]
+        assert note.markdown == LOG_NOTE
+
+    async def test_overflow_refused_with_nothing_written(self):
+        note = FakeHeadingNote("doc.md", DEEP_NOTE)
+        seen = []
+        async with self._client(note, seen) as client:
+            with pytest.raises(ToolError) as exc_info:
+                await client.patch_note(
+                    "doc.md",
+                    operation="append",
+                    target_type="heading",
+                    target="A::B::C::D::E",
+                    content="\n# Fine\n\n## Too deep\n",
+                )
+        message = str(exc_info.value)
+        assert '"Too deep"' in message
+        assert "level 7" in message
+        assert "is an h5" in message
+        assert "Nothing was written" in message
+        assert "allow_deep_headings=True" in message
+        assert [r.method for r in seen] == ["GET"]
+        assert seen[0].headers["accept"] == "text/markdown"
+        assert note.markdown == DEEP_NOTE
+
+    async def test_overflow_up_to_h6_is_sent(self):
+        note = FakeHeadingNote("doc.md", DEEP_NOTE)
+        async with self._client(note, []) as client:
+            await client.patch_note(
+                "doc.md",
+                operation="append",
+                target_type="heading",
+                target="A::B::C::D::E",
+                content="\n# Fine\n",
+            )
+        assert note.markdown.endswith("###### Fine\n")
+
+    async def test_overflow_allowed_with_flag(self):
+        note = FakeHeadingNote("doc.md", DEEP_NOTE)
+        seen = []
+        async with self._client(note, seen) as client:
+            await client.patch_note(
+                "doc.md",
+                operation="append",
+                target_type="heading",
+                target="A::B::C::D::E",
+                content="\n# Fine\n\n## Too deep\n",
+                allow_deep_headings=True,
+            )
+        assert [r.method for r in seen] == ["PATCH"]
+        assert "####### Too deep" in note.markdown
+
+    @pytest.mark.parametrize(
+        "content, refused",
+        [("# Sib\n\n## Child\n", False), ("# Sib\n\n## Child\n\n### Grand\n", True)],
+    )
+    async def test_insert_overflow_uses_parent_level(self, content, refused):
+        # E is an h5, so a sibling is an h5 too: '##' lands at h6, '###' at h7.
+        note = FakeHeadingNote("doc.md", DEEP_NOTE)
+        async with self._client(note, []) as client:
+            call = client.patch_note(
+                "doc.md",
+                operation="insert_after",
+                target_type="heading",
+                target="A::B::C::D::E",
+                content=content,
+            )
+            if refused:
+                with pytest.raises(ToolError, match="level 7"):
+                    await call
+            else:
+                await call
+        assert (note.markdown == DEEP_NOTE) is refused
+
+    @pytest.mark.parametrize(
+        "markdown",
+        [
+            # Without stripping frontmatter, the YAML comment "## B" would
+            # match first and make B an h2.
+            "---\n# A\n## B\n---\n# A\n\n#### B\n",
+            # Likewise a fenced "## B".
+            "# A\n\n```\n## B\n```\n\n#### B\n",
+        ],
+    )
+    async def test_target_level_ignores_frontmatter_and_fences(self, markdown):
+        async with make_client(markdown_patch_v2_handler(note_factory=lambda: markdown)) as client:
+            with pytest.raises(ToolError, match="is an h4"):
+                await client.patch_note(
+                    "doc.md",
+                    operation="append",
+                    target_type="heading",
+                    target="A::B",
+                    content="\n# x\n\n## y\n\n### z\n",
+                )
+
+    async def test_unknown_target_level_is_sent(self):
+        # Empty note: the level can't be found, so the plugin decides.
+        async with make_client(markdown_patch_v2_handler()) as client:
+            warnings, _etag = await client.patch_note(
+                "doc.md",
+                operation="append",
+                target_type="heading",
+                target="Setext::Heading",
+                content="\n# x\n\n## y\n\n### z\n\n#### w\n\n##### v\n\n###### u\n",
+            )
+        assert warnings == []
+
+    async def test_no_note_read_without_headings_in_content(self):
+        seen = []
+        inner = markdown_patch_v2_handler()
+
+        def handler(request):
+            seen.append(request)
+            return inner(request)
+
+        async with make_client(handler) as client:
+            await client.patch_note(
+                "doc.md",
+                operation="append",
+                target_type="heading",
+                target="Doc",
+                content="\nplain\n",
+            )
+        assert [r.method for r in seen] == ["PATCH"]
+
+    async def test_ts_westworld_absolute_append_refused(self):
+        # Regression: '### New entry' appended to an h3, copied from the note.
+        note = FakeHeadingNote("doc.md", LOG_NOTE)
+        async with self._client(note, []) as client:
+            with pytest.raises(ToolError, match="3 '#'s"):
+                await client.patch_note(
+                    "doc.md",
+                    operation="append",
+                    target_type="heading",
+                    target="Log::Decisions::Entry two",
+                    content="\n### New entry\n\nbody\n",
+                )
+        assert note.markdown == LOG_NOTE
+
+    async def test_ts_westworld_sibling_via_replace_refused(self):
+        # Regression: a replace carrying a second '### New entry' meant as a
+        # sibling. Refused for its absolute level before the child check.
+        note = FakeHeadingNote("doc.md", LOG_NOTE)
+        async with self._client(note, []) as client:
+            with pytest.raises(ToolError, match="insert_after"):
+                await client.patch_note(
+                    "doc.md",
+                    operation="replace",
+                    target_type="heading",
+                    target="Log::Decisions::Entry two",
+                    content="two body\n\n### New entry\n\nbody\n",
+                )
+        assert note.markdown == LOG_NOTE
+
+    @pytest.mark.parametrize(
+        "kwargs, fragment",
+        [
+            ({"target_type": "block-reference", "target": "b1"}, "insert_after applies only"),
+            ({"target_type": "frontmatter-key", "target": "k"}, "insert_after applies only"),
+            ({"within": 0}, "insert_after applies only"),
+            ({"replace_children": True}, "replace_children applies"),
+            ({"delete_scope": "all"}, "delete_scope applies only"),
+            ({"content": None, "value": ["x"]}, "'value' and create_if_missing apply only"),
+            ({"create_if_missing": True}, "'value' and create_if_missing apply only"),
+            ({"content": None}, "exactly one of"),
+            (
+                {"operation": "delete", "content": None, "allow_deep_headings": True},
+                "allow_deep_headings applies only",
+            ),
+            (
+                {"operation": "append", "within": 0, "allow_deep_headings": True},
+                "allow_deep_headings applies only",
+            ),
+            (
+                {
+                    "target_type": "frontmatter-key",
+                    "target": "k",
+                    "operation": "replace",
+                    "allow_deep_headings": True,
+                },
+                "allow_deep_headings applies only",
+            ),
+        ],
+    )
+    async def test_invalid_combinations_rejected_before_request(self, kwargs, fragment):
+        seen = []
+
+        def handler(request):
+            seen.append(request)
+            return httpx.Response(200)
+
+        args = {
+            "operation": "insert_after",
+            "target_type": "heading",
+            "target": "Doc",
+            "content": "# New",
+            **kwargs,
+        }
         async with make_client(handler) as client:
             with pytest.raises(ToolError, match=fragment):
                 await client.patch_note("doc.md", **args)

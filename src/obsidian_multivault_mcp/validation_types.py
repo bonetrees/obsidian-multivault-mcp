@@ -122,7 +122,7 @@ ETag = Annotated[str, BeforeValidator(validate_etag)]
 # smart-mode union matches exact types first, so "1.0" stays a str and
 # true stays a bool.
 FrontmatterValue = list[JsonValue] | dict[str, JsonValue] | str | bool | int | float
-PatchOperation = Literal["append", "prepend", "replace", "delete"]
+PatchOperation = Literal["append", "prepend", "replace", "delete", "insert_after", "insert_before"]
 DeleteScope = Literal["all", "content", "marker"]
 HeadingSegments = Annotated[list[str], AfterValidator(validate_heading_segments)]
 PatchTargetType = Literal["heading", "block-reference", "frontmatter-key"]
