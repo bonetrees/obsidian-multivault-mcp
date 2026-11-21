@@ -50,6 +50,13 @@ async def patch_note(
       first if you are unsure of the structure. If a heading's own text
       contains `::`, pass the path as a **list** of heading texts instead,
       e.g. `["Report", "Q1::Q2 summary"]`.
+
+      **Headings inside `content` are relative to the target, not
+      absolute.** A leading `#` becomes a *direct child* of the target,
+      `##` a grandchild, and so on. Under `### Critical`, write
+      `# Details` to get `#### Details`; writing `### Details` would
+      produce `###### Details`, three levels below the target. Never
+      copy the absolute `#` count from the note.
     - `target_type="block-reference"` — `target` is the block ID (the
       `^block-id` at the end of a block, without the `^`).
     - `target_type="frontmatter-key"` — `target` is the YAML key name
@@ -107,8 +114,9 @@ async def patch_note(
     The response carries a `warnings` list. It is normally empty; a
     non-empty entry means the patch **was applied** but something about
     the result is worth knowing (e.g. a created heading nested deeper
-    than Markdown's six levels, which leaves it unaddressable by later
-    `heading` patches). Warnings are not failures — a failed patch
+    than Markdown's six levels, usually from absolute `#` counts in
+    `content`, which leaves it unaddressable by later `heading`
+    patches). Warnings are not failures — a failed patch
     raises instead.
 
     Pass `if_match` (the `etag` from `read_note`, or from this tool's
