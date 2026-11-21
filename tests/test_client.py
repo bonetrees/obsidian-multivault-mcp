@@ -2244,9 +2244,33 @@ class TestPatchChildHeadings:
         # so the child is found and no PATCH goes out.
         assert seen == []
 
-    async def test_repeated_heading_marker_is_stripped_from_message(self):
+    @pytest.mark.parametrize(
+        "children, listed, example, reach_note",
+        [
+            # Every child repeated: the example can only reach the first.
+            (
+                {"Log": {}, "Log\u2063\u2063": {}},
+                '("Log" (2 headings with this name))',
+                "'Doc::Log'",
+                True,
+            ),
+            # A uniquely named child exists, so the example uses it.
+            (
+                {"Dup": {}, "Dup\u2063\u2063": {}, "Notes": {}},
+                '("Dup" (2 headings with this name), "Notes")',
+                "'Doc::Notes'",
+                False,
+            ),
+        ],
+    )
+    async def test_repeated_child_names_are_counted_not_repeated(
+        self, children, listed, example, reach_note
+    ):
+        # The plugin keys repeated headings with an opaque non-printable
+        # suffix. Stripped, they'd read "Log", "Log" and suggest a path that
+        # only ever reaches the first one.
         def doc_map():
-            return document_map({"Doc": {"Log": {}, "Log\u2063\u2063": {}}})
+            return document_map({"Doc": children})
 
         async with make_client(markdown_patch_v2_handler(None, doc_map)) as client:
             with pytest.raises(ToolError) as exc_info:
@@ -2257,7 +2281,11 @@ class TestPatchChildHeadings:
                     target="Doc",
                     content="x",
                 )
-        assert '("Log", "Log")' in str(exc_info.value)
+        message = str(exc_info.value)
+        assert listed in message
+        assert f"(e.g. {example})" in message
+        assert ("reaches only the first" in message) is reach_note
+        assert "\u2063" not in message
 
     async def test_heading_level_warning_skipped_for_within(self):
         note = FakeHeadingNote("doc.md", PARENT_WITH_CHILDREN)

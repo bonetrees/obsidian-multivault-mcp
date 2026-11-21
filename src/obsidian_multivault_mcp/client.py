@@ -13,6 +13,7 @@ import math
 import os
 import re
 import urllib.parse
+from collections import Counter
 from typing import Any
 
 import httpx
@@ -640,15 +641,27 @@ class ObsidianVaultClient:
         if not children:
             return
         joined = self.HEADING_PATH_DELIMITER.join(self._heading_segments(target))
-        names = ", ".join(f'"{name}"' for name in children)
+        # Repeated names are listed once with a count. A path can only reach
+        # the first of them, so the example prefers a uniquely named child.
+        counts = Counter(children)
+        names = ", ".join(
+            f'"{name}"' if count == 1 else f'"{name}" ({count} headings with this name)'
+            for name, count in counts.items()
+        )
+        example = next((name for name, count in counts.items() if count == 1), None)
+        if example is None:
+            example = children[0]
+            reach = f" A path to a repeated name reaches only the first '{example}'."
+        else:
+            reach = ""
         raise ToolError(
             f"patch_note for vault '{self.name}'{location}: refusing to replace heading "
             f"'{joined}', because a heading replace also deletes all of its child "
             f"headings ({names}) and their contents. Nothing was written. To edit only "
             "the text above the first child, pass within=<block index> (0 = first "
             "block, -1 = last). To change one child, target it directly (e.g. "
-            f"'{joined}::{children[0]}'). To replace the whole section including its "
-            "children, pass replace_children=True."
+            f"'{joined}::{example}').{reach} To replace the whole section including "
+            "its children, pass replace_children=True."
         )
 
     def _parse_patch_warnings(self, response: httpx.Response) -> list[dict]:
