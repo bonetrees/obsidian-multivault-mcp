@@ -7,6 +7,7 @@ single REST endpoint and raises ToolError on transport or HTTP failure.
 import json
 import math
 import os
+import re
 import urllib.parse
 from typing import Any
 
@@ -592,6 +593,65 @@ class ObsidianVaultClient:
         # else so the tool layer always hands back a uniform list of dicts.
         return [entry if isinstance(entry, dict) else {"message": str(entry)} for entry in parsed]
 
+    # Client-side counterpart to the plugin's heading-depth-overflow notice.
+    HEADING_LEVEL_WARNING_CODE = "heading-level-not-relative"
+    _ATX_HEADING = re.compile(r"^ {0,3}(#{1,6})[ \t]+(.*?)[ \t]*$")
+    _CODE_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+
+    @classmethod
+    def _heading_level_warnings(
+        cls, wire_target_type: str, target: str | list[str], content: str | None
+    ) -> list[dict]:
+        """Flag heading content that looks absolute rather than relative.
+
+        v2 rebases every heading in a heading target's content by the
+        target's level (verified live for append, prepend and replace): `#`
+        is a direct child. A correct relative fragment therefore starts at
+        `#`, while a `#` count copied from the note is always 2 or more,
+        since no child heading is shallower than h2. So the shallowest
+        heading having 2+ `#`s is the signal. That needs no knowledge of
+        the target's real level, which the path can't give: notes skip
+        levels, so segment count is only a lower bound.
+
+        The plugin only warns once a heading is pushed past h6, so in a
+        shallow note the mistake is otherwise silent. Advisory only: the
+        write has already happened by the time this runs. Only heading
+        targets carrying `content` are checked, which excludes deletes.
+        """
+        if wire_target_type != "heading" or content is None:
+            return []
+        fence: str | None = None
+        # One past h6 means "no heading seen yet".
+        level, text = 7, ""
+        for line in content.splitlines():
+            fence_match = cls._CODE_FENCE.match(line)
+            if fence_match:
+                marker = fence_match.group(1)
+                if fence is None:
+                    fence = marker
+                elif marker[0] == fence[0] and len(marker) >= len(fence):
+                    fence = None
+                continue
+            if fence is not None:
+                continue
+            heading = cls._ATX_HEADING.match(line)
+            if heading and len(heading.group(1)) < level:
+                level, text = len(heading.group(1)), heading.group(2).rstrip("#").rstrip()
+        if not 2 <= level <= 6:
+            return []
+        path = cls.HEADING_PATH_DELIMITER.join(target) if isinstance(target, list) else target
+        return [
+            {
+                "code": cls.HEADING_LEVEL_WARNING_CODE,
+                "message": (
+                    f'Heading "{text}" in content was written with {level} "#"s, so it '
+                    f'landed {level} levels below "{path}". Heading levels in content '
+                    f'are relative to the target: "#" means a direct child. If you '
+                    f"copied the level from the note, fix the heading."
+                ),
+            }
+        ]
+
     def _patch_body(
         self,
         headers: dict[str, str],
@@ -780,7 +840,12 @@ class ObsidianVaultClient:
                 "frontmatter": self.FRONTMATTER_TARGET_HINT,
             }.get(wire_target_type),
         )
-        return self._parse_patch_warnings(response), self._etag(response)
+        # Plugin warnings first, then this client's own heading-level check.
+        return (
+            self._parse_patch_warnings(response)
+            + self._heading_level_warnings(wire_target_type, target, content),
+            self._etag(response),
+        )
 
     async def delete_note(self, path: str, if_match: str | None = None) -> None:
         response = await self._request(
