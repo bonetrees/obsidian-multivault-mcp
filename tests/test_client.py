@@ -2793,3 +2793,104 @@ class TestInsertDuplicateSibling:
                 content="# Follow-up\n",
             )
         assert note.markdown.endswith("### Follow-up\n")
+
+
+class TestHeadingTextWithHashes:
+    """A '#' run is only a closing sequence after whitespace, so 'C#' keeps it."""
+
+    @pytest.mark.parametrize(
+        "line, text",
+        [
+            ("## C#", "C#"),
+            ("## F# and C#", "F# and C#"),
+            ("## Issue #42", "Issue #42"),
+            ("## Notes ##", "Notes"),
+            ("## Tag #", "Tag"),
+            ("## C# ##", "C#"),
+            ("## C#\t#  ", "C#"),
+            ("## ##", ""),
+        ],
+    )
+    def test_atx_heading_text(self, line, text):
+        assert ObsidianVaultClient._atx_headings(line) == [(2, text)]
+
+    _client = staticmethod(TestSiblingInsertAndOverflow._client)
+
+    async def test_overflow_refused_under_target_ending_in_hash(self):
+        # Reported repro: 'C#' was read as 'C', so the path never matched and
+        # the h7 write went through.
+        markdown = "# Langs\n\n## B\n\n### C\n\n#### D\n\n##### C#\n\nc\n"
+        note = FakeHeadingNote("doc.md", markdown)
+        async with self._client(note, []) as client:
+            with pytest.raises(ToolError, match=r"level 7 \('Langs::B::C::D::C#' is an h5\)"):
+                await client.patch_note(
+                    "doc.md",
+                    operation="append",
+                    target_type="heading",
+                    target="Langs::B::C::D::C#",
+                    content="\n# x\n\n## y\n",
+                )
+        assert note.markdown == markdown
+
+    async def test_insert_title_ending_in_hash_is_not_confused_with_its_stem(self):
+        note = FakeHeadingNote("doc.md", "# Langs\n\n## C\n\nc body\n")
+        args = {
+            "operation": "insert_after",
+            "target_type": "heading",
+            "target": "Langs::C",
+            "content": "# C#\n\nsharp body",
+        }
+        async with self._client(note, []) as client:
+            await client.patch_note("doc.md", **args)
+            once = note.markdown
+            with pytest.raises(ToolError, match='already has a heading "C#"'):
+                await client.patch_note("doc.md", **args)
+        assert "## C\n\nc body\n\n## C#\n\nsharp body" in once
+        assert note.markdown == once
+
+
+class TestPreconditionFailedHasNoTargetHint:
+    """A 412 is about the note's version, never about how the target was named."""
+
+    @staticmethod
+    def _stale(_request):
+        return httpx.Response(
+            412,
+            json={"errorCode": 41200, "message": "The resource has changed since that version."},
+        )
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"target_type": "heading", "target": "Report::Findings", "content": "x"},
+            {"target_type": "heading", "target": "Report", "content": "x", "within": 0},
+            {"target_type": "frontmatter-key", "target": "status", "content": "done"},
+        ],
+    )
+    async def test_412_carries_no_hint(self, kwargs):
+        async with make_client(markdown_patch_v2_handler(self._stale)) as client:
+            with pytest.raises(PreconditionFailed) as exc_info:
+                await client.patch_note("doc.md", operation="append", if_match='"abc"', **kwargs)
+        message = str(exc_info.value)
+        assert message.endswith("nothing was written: The resource has changed since that version.")
+        for hint in (
+            ObsidianVaultClient.HEADING_TARGET_HINT,
+            ObsidianVaultClient.WITHIN_HINT,
+            ObsidianVaultClient.FRONTMATTER_TARGET_HINT,
+        ):
+            assert hint not in message
+
+    async def test_404_still_carries_the_heading_hint(self):
+        def missing(_request):
+            return httpx.Response(404, json={"errorCode": 40400, "message": "Not Found"})
+
+        async with make_client(markdown_patch_v2_handler(missing)) as client:
+            with pytest.raises(NotFound) as exc_info:
+                await client.patch_note(
+                    "doc.md",
+                    operation="append",
+                    target_type="heading",
+                    target="Report::Findings",
+                    content="x",
+                )
+        assert ObsidianVaultClient.HEADING_TARGET_HINT in str(exc_info.value)
