@@ -2726,3 +2726,70 @@ class TestSiblingInsertAndOverflow:
             with pytest.raises(ToolError, match=fragment):
                 await client.patch_note("doc.md", **args)
         assert seen == []
+
+
+class TestInsertDuplicateSibling:
+    """A retried insert duplicates the section, so a clashing title is refused."""
+
+    _client = staticmethod(TestSiblingInsertAndOverflow._client)
+
+    async def test_retried_insert_is_refused(self):
+        note = FakeHeadingNote("doc.md", LOG_NOTE)
+        seen = []
+        args = {
+            "operation": "insert_after",
+            "target_type": "heading",
+            "target": "Log::Decisions::Entry one",
+            "content": "# Entry new\n\nnew body",
+        }
+        async with self._client(note, seen) as client:
+            await client.patch_note("doc.md", **args)
+            once = note.markdown
+            seen.clear()
+            with pytest.raises(ToolError) as exc_info:
+                await client.patch_note("doc.md", **args)
+        message = str(exc_info.value)
+        assert "'Log::Decisions' already has a heading \"Entry new\"" in message
+        assert "retry" in message
+        assert "Nothing was written" in message
+        assert note.markdown == once
+        assert [r.method for r in seen] == ["GET"]
+        assert seen[0].headers["accept"] == "application/vnd.olrapi.document-map+json"
+
+    async def test_clash_with_existing_sibling_is_refused(self):
+        note = FakeHeadingNote("doc.md", LOG_NOTE)
+        async with self._client(note, []) as client:
+            with pytest.raises(ToolError, match='already has a heading "Entry two"'):
+                await client.patch_note(
+                    "doc.md",
+                    operation="insert_before",
+                    target_type="heading",
+                    target="Log::Decisions::Entry one",
+                    content="# Entry two\n",
+                )
+        assert note.markdown == LOG_NOTE
+
+    async def test_top_level_clash_names_the_document_root(self):
+        note = FakeHeadingNote("doc.md", "# Doc\n\nbody\n\n# Other\n\nmore\n")
+        async with self._client(note, []) as client:
+            with pytest.raises(ToolError, match='the document root already has a heading "Other"'):
+                await client.patch_note(
+                    "doc.md",
+                    operation="insert_after",
+                    target_type="heading",
+                    target="Doc",
+                    content="# Other\n",
+                )
+
+    async def test_same_name_under_another_parent_is_fine(self):
+        # "Follow-up" exists, but as a child of Entry one, not of Decisions.
+        note = FakeHeadingNote("doc.md", LOG_NOTE)
+        async with self._client(note, []) as client:
+            await client.patch_note(
+                "doc.md",
+                operation="insert_after",
+                target_type="heading",
+                target="Log::Decisions::Entry two",
+                content="# Follow-up\n",
+            )
+        assert note.markdown.endswith("### Follow-up\n")

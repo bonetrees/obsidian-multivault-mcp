@@ -790,6 +790,7 @@ class ObsidianVaultClient:
             self._refuse_absolute_levels(prefix, joined, operation, headings)
         if operation in self._INSERT_WIRE:
             self._refuse_headless_insert(prefix, joined, operation, content)
+            await self._refuse_duplicate_sibling(prefix, path, target, content)
         if not allow_deep_headings and headings:
             await self._refuse_heading_overflow(prefix, joined, path, operation, target, headings)
         if operation == "replace" and not replace_children:
@@ -847,6 +848,36 @@ class ObsidianVaultClient:
             "must open with that section's heading line at '#' (e.g. "
             "'# New entry\\n\\nbody'). Nothing was written. To add text inside "
             f"'{joined}' instead, use append or prepend."
+        )
+
+    async def _refuse_duplicate_sibling(
+        self, prefix: str, path: str, target: str | list[str], content: str
+    ) -> None:
+        """Refuse a sibling insert whose title the parent already has.
+
+        Retrying an insert adds a second copy: the REST API doesn't enable
+        the plugin's idempotency guard by default, and with it enabled the
+        guard only searches the target's own subtree, which a sibling lands
+        outside (both verified live on 5.5.2). A repeated name under one
+        parent is also unreachable by path, which only ever finds the first.
+        So a clash is refused, using the same document map as the child
+        check. One GET.
+        """
+        segments = self._heading_segments(target)
+        title = self._atx_headings(content)[0][1]
+        if title not in await self._heading_children(path, segments[:-1]):
+            return
+        parent = (
+            f"'{self.HEADING_PATH_DELIMITER.join(segments[:-1])}'"
+            if len(segments) > 1
+            else "the document root"
+        )
+        raise ToolError(
+            f'{prefix} refusing: {parent} already has a heading "{title}". Inserting '
+            "another would duplicate it, and a path to a repeated name reaches only the "
+            "first. Nothing was written. If this is a retry of an insert that already "
+            "succeeded, there is nothing to do; otherwise give the new section a "
+            "distinct title."
         )
 
     async def _refuse_heading_overflow(
