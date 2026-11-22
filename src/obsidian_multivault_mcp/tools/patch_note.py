@@ -30,7 +30,9 @@ from ..validation_types import (
     annotations={"readOnlyHint": False, "openWorldHint": False, "destructiveHint": True},
     tags={"obsidian", "write"},
 )
-async def patch_note(
+# Every local but the result is a tool parameter, and each one is part of
+# the MCP schema, so there is nothing to fold away.
+async def patch_note(  # pylint: disable=too-many-locals
     ctx: Context,
     vault: Annotated[VaultName, Field(description="Vault name, as listed by list_vaults.")],
     path: Annotated[
@@ -41,10 +43,17 @@ async def patch_note(
         PatchOperation,
         Field(
             description=(
-                "'append' adds after the target's content and 'prepend' before it; "
+                "'append' adds after the target's content and 'prepend' before it; on a "
+                "heading with child headings, append lands after the last child. "
                 "'replace' overwrites it; 'delete' removes the target (see delete_scope). "
-                "append/prepend/replace need 'content' (or 'value' for frontmatter); "
-                "delete takes neither. Append adds no newline: start content with '\\n'."
+                "'insert_after' / 'insert_before' (heading targets only) add a NEW "
+                "section at the target's own level: after its whole section, children "
+                "included, or before its heading line. Their content must open with "
+                "'# Title', since '#' there means a sibling of the target, and a title "
+                "the parent already has is refused (a retry would duplicate it). "
+                "append/prepend/replace/insert need 'content' (or 'value' for "
+                "frontmatter); delete takes neither. Append adds no newline: start "
+                "content with '\\n'."
             )
         ),
     ],
@@ -73,8 +82,11 @@ async def patch_note(
             description=(
                 "The text to write. Heading targets: heading levels in content are "
                 "RELATIVE to the target, so '#' is a direct child and '##' a grandchild "
-                "(under '### Critical', '# Details' becomes '#### Details'). Never copy "
-                "the note's absolute '#' count. Frontmatter targets: always written as a "
+                "(under '### Critical', '# Details' becomes '#### Details'); for "
+                "insert_after/insert_before, '#' is a sibling. Never copy the note's "
+                "absolute '#' count: content whose shallowest heading has 2+ '#'s, or "
+                "a heading that would land past h6, is refused with nothing written "
+                "(see allow_deep_headings). Frontmatter targets: always written as a "
                 "YAML string, so '1.0', 'true' and 'null' stay strings; content that "
                 "looks like a JSON list or object is refused, so use 'value'. With "
                 "'within', spliced literally into that one block."
@@ -157,6 +169,17 @@ async def patch_note(
             )
         ),
     ] = False,
+    allow_deep_headings: Annotated[
+        StrictBool,
+        Field(
+            description=(
+                "Heading targets with content, without 'within'. Content whose "
+                "shallowest heading has 2+ '#'s looks copied from the note's absolute "
+                "levels, and a heading past h6 stops being a heading, so both are "
+                "refused. Set true only when that deeper nesting is really intended."
+            )
+        ),
+    ] = False,
 ) -> dict:
     """Surgically edit one section of a note: a heading, a block reference
     or a frontmatter key. Prefer this over `write_note`, because the rest of
@@ -170,7 +193,12 @@ async def patch_note(
     - Headings inside `content` are **relative to the target**: `#` is a
       direct child, `##` a grandchild. Under `### Critical`, write
       `# Details` to get `#### Details`. Never copy the note's absolute
-      `#` count.
+      `#` count: content whose top heading has 2+ `#`s, or that would go
+      past h6, is **refused**.
+    - To add a **sibling** section (a new log or decision entry), use
+      `insert_after` / `insert_before` on the neighbouring heading, with
+      content opening `# Title`. `append` only ever adds children, after
+      the last existing child.
     - A heading `replace` overwrites everything beneath the heading,
       **child headings included**, so it is **refused** when the heading
       has children. To edit only the text above the first child, pass
@@ -183,10 +211,8 @@ async def patch_note(
       read. If the note changed, nothing is written.
 
     Returns `status`, the note's new `etag`, and `warnings`: advisory
-    `{code, message}` notes on a patch that **was applied**. These are
-    `heading-depth-overflow` (from the plugin: a heading landed past h6)
-    and `heading-level-not-relative` (from this server: a heading in
-    `content` probably used absolute levels). A failed patch raises.
+    `{code, message}` notes from the plugin on a patch that **was
+    applied**. A failed or refused patch raises.
     """
     warnings, etag = await get_client(ctx, vault).patch_note(
         path=path,
@@ -200,6 +226,7 @@ async def patch_note(
         delete_scope=delete_scope,
         within=within,
         replace_children=replace_children,
+        allow_deep_headings=allow_deep_headings,
     )
     return {
         "vault": vault,

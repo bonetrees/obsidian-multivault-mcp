@@ -564,6 +564,79 @@ class TestPatchNoteChildHeadings:
         assert props["replace_children"]["type"] == "boolean"
 
 
+class TestPatchNoteSiblingInsert:
+    """Sibling inserts and the heading-level refusals, end to end through MCP."""
+
+    LOG = (
+        "# Log\n\n## Decisions\n\n### Entry one\n\none body\n\n#### Follow-up\n\n"
+        "follow body\n\n### Entry two\n\ntwo body\n"
+    )
+
+    @pytest.fixture
+    def note(self):
+        return FakeHeadingNote("doc.md", self.LOG)
+
+    @pytest.fixture
+    def vault_handlers(self, note):
+        return {"v": note.handler}
+
+    @staticmethod
+    def _args(**kwargs):
+        return {
+            "vault": "v",
+            "path": "doc.md",
+            "operation": "insert_after",
+            "target_type": "heading",
+            "target": "Log::Decisions::Entry one",
+            "content": "# Entry new\n\nnew body",
+            **kwargs,
+        }
+
+    async def test_insert_after_lands_as_sibling_after_children(self, mcp_client, note):
+        result = await _call(mcp_client, "patch_note", self._args())
+        assert result["operation"] == "insert_after"
+        assert "follow body\n\n### Entry new\n\nnew body\n\n### Entry two" in note.markdown
+
+    async def test_insert_before_lands_before_heading(self, mcp_client, note):
+        await _call(
+            mcp_client,
+            "patch_note",
+            self._args(operation="insert_before", target="Log::Decisions::Entry two"),
+        )
+        assert "follow body\n\n### Entry new\n\nnew body\n\n### Entry two" in note.markdown
+
+    async def test_absolute_append_refused_note_untouched(self, mcp_client, note):
+        # TS-Westworld regression: '### New entry' copied from the note.
+        with pytest.raises(ToolError, match="looks copied from the note"):
+            await _call(
+                mcp_client,
+                "patch_note",
+                self._args(operation="append", content="\n### New entry\n\nbody\n"),
+            )
+        assert note.markdown == self.LOG
+        assert not [r for r in note.requests if r.method == "PATCH"]
+
+    async def test_allow_deep_headings_reaches_the_client(self, mcp_client, note):
+        await _call(
+            mcp_client,
+            "patch_note",
+            self._args(operation="append", content="\n## Deep\n", allow_deep_headings=True),
+        )
+        assert "follow body\n\n##### Deep\n\n### Entry two" in note.markdown
+
+    @pytest.mark.parametrize("bad", ["true", 1])
+    async def test_allow_deep_headings_must_be_a_real_bool(self, mcp_client, note, bad):
+        with pytest.raises(ToolError):
+            await _call(mcp_client, "patch_note", self._args(allow_deep_headings=bad))
+        assert note.requests == []
+
+    async def test_schema_lists_new_operations(self, mcp_client):
+        tool = next(t for t in await mcp_client.list_tools() if t.name == "patch_note")
+        props = tool.inputSchema["properties"]
+        assert {"insert_after", "insert_before"} <= set(props["operation"]["enum"])
+        assert props["allow_deep_headings"]["type"] == "boolean"
+
+
 class TestToolDescriptions:
     """Claude Code truncates a tool description at 2KB before the model sees
     it (obsidian-local-rest-api#295). Past the cut, rules are silently lost:
@@ -584,7 +657,7 @@ class TestToolDescriptions:
         tool = next(t for t in await mcp_client.list_tools() if t.name == "patch_note")
         for rule in ("full path from the document root", "relative to the target", "refused"):
             assert rule in tool.description
-        for param in ("within", "replace_children"):
+        for param in ("within", "replace_children", "insert_after", "insert_before"):
             assert param in tool.description
 
     async def test_every_patch_note_parameter_is_described(self, mcp_client):
