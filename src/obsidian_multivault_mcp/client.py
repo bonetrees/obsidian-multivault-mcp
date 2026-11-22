@@ -262,7 +262,7 @@ class ObsidianVaultClient:
         ``hint`` appends caller-supplied guidance to the branches where the
         caller knows something the status code doesn't — currently
         patch_note's heading-path syntax, which is the likeliest cause of a
-        404 or a failed patch but means nothing on a 401. Passing it in beats
+        404 or a failed patch but means nothing on a 401 or a 412. Passing it in beats
         hardcoding it here: the old unconditional '::' advice on every 40080
         told callers patching a *frontmatter key* to go check their heading
         delimiter.
@@ -290,9 +290,12 @@ class ObsidianVaultClient:
                 f"{msg}{hint_part}"
             )
         if response.status_code == 412:
+            # No hint: a stale version has nothing to do with how the target
+            # was addressed, and target advice would send the caller chasing
+            # the wrong fix.
             raise PreconditionFailed(
                 f"Precondition failed{location} in vault '{self.name}' during "
-                f"{operation} (HTTP 412); nothing was written: {msg}{hint_part}"
+                f"{operation} (HTTP 412); nothing was written: {msg}"
             )
         if response.status_code == 405:
             raise ToolError(
@@ -705,6 +708,9 @@ class ObsidianVaultClient:
 
     _ATX_HEADING = re.compile(r"^ {0,3}(#{1,6})[ \t]+(.*?)[ \t]*$")
     _CODE_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+    # An ATX closing sequence is a '#' run with whitespace before it (or the
+    # whole text), so 'C#' and 'F# and C#' keep their '#'s, as in the plugin.
+    _CLOSING_HASHES = re.compile(r"(?:^|[ \t]+)#+[ \t]*$")
     # Same shape the read_note curator strips: a leading YAML block, whose
     # `# comment` lines must not be mistaken for headings.
     _FRONTMATTER = re.compile(r"^---\r?\n(?:.*?\r?\n)?---(?:\r?\n|\Z)", re.DOTALL)
@@ -732,7 +738,8 @@ class ObsidianVaultClient:
                 continue
             heading = cls._ATX_HEADING.match(line)
             if heading:
-                headings.append((len(heading.group(1)), heading.group(2).rstrip("#").rstrip()))
+                text = cls._CLOSING_HASHES.sub("", heading.group(2))
+                headings.append((len(heading.group(1)), text))
         return headings
 
     async def _target_levels(self, path: str, target: str | list[str]) -> tuple[int, int] | None:
@@ -1122,7 +1129,7 @@ class ObsidianVaultClient:
         ``insert_after``/``insert_before`` add a sibling section — see
         _INSERT_WIRE. Heading content whose levels look absolute, or would
         land past h6, is refused unless ``allow_deep_headings`` is set — see
-        _refuse_bad_heading_levels.
+        _check_heading_patch.
         """
         wire_target_type = self._TARGET_TYPE_WIRE.get(target_type, target_type)
         self._check_patch_args(
