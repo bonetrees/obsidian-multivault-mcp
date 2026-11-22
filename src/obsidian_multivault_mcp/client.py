@@ -14,6 +14,7 @@ import os
 import re
 import urllib.parse
 from collections import Counter
+from datetime import date
 from typing import Any
 
 import httpx
@@ -868,11 +869,14 @@ class ObsidianVaultClient:
         outside (both verified live on 5.5.2). A repeated name under one
         parent is also unreachable by path, which only ever finds the first.
         So a clash is refused, using the same document map as the child
-        check. One GET.
+        check. One GET. There is deliberately no override (see CLAUDE.md,
+        *Sibling inserts and heading levels*): unique titles keep every
+        section addressable, so the message suggests one.
         """
         segments = self._heading_segments(target)
         title = self._atx_headings(content)[0][1]
-        if title not in await self._heading_children(path, segments[:-1]):
+        copies = (await self._heading_children(path, segments[:-1])).count(title)
+        if not copies:
             return
         parent = (
             f"'{self.HEADING_PATH_DELIMITER.join(segments[:-1])}'"
@@ -883,8 +887,9 @@ class ObsidianVaultClient:
             f'{prefix} refusing: {parent} already has a heading "{title}". Inserting '
             "another would duplicate it, and a path to a repeated name reaches only the "
             "first. Nothing was written. If this is a retry of an insert that already "
-            "succeeded, there is nothing to do; otherwise give the new section a "
-            "distinct title."
+            "succeeded, there is nothing to do. Otherwise give the new section a title "
+            "that's unique under its parent, e.g. "
+            f"'# {title} ({copies + 1})' or '# {date.today().isoformat()} {title}'."
         )
 
     async def _refuse_heading_overflow(

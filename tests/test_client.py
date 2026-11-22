@@ -1,6 +1,7 @@
 """Tests for ObsidianVaultClient using httpx.MockTransport."""
 
 import json
+from datetime import date
 import urllib.parse
 
 import httpx
@@ -8,7 +9,13 @@ import pytest
 from fastmcp.exceptions import ToolError
 
 from obsidian_multivault_mcp.client import NotFound, ObsidianVaultClient, PreconditionFailed
-from tests.plugin_fakes import FakeFrontmatterNote, FakeHeadingNote, FakeVaultNote, content_etag
+from tests.plugin_fakes import (
+    FakeFrontmatterNote,
+    FakeHeadingNote,
+    FakeVaultNote,
+    content_etag,
+    repeat_key,
+)
 
 
 def make_client(handler, **overrides) -> ObsidianVaultClient:
@@ -2288,14 +2295,14 @@ class TestPatchChildHeadings:
         [
             # Every child repeated: the example can only reach the first.
             (
-                {"Log": {}, "Log\u2063\u2063": {}},
+                {"Log": {}, repeat_key("Log", 2): {}},
                 '("Log" (2 headings with this name))',
                 "'Doc::Log'",
                 True,
             ),
             # A uniquely named child exists, so the example uses it.
             (
-                {"Dup": {}, "Dup\u2063\u2063": {}, "Notes": {}},
+                {"Dup": {}, repeat_key("Dup", 2): {}, "Notes": {}},
                 '("Dup" (2 headings with this name), "Notes")',
                 "'Doc::Notes'",
                 False,
@@ -2324,7 +2331,7 @@ class TestPatchChildHeadings:
         assert listed in message
         assert f"(e.g. {example})" in message
         assert ("reaches only the first" in message) is reach_note
-        assert "\u2063" not in message
+        assert "\U000fc750" not in message
 
     async def test_heading_level_check_skipped_for_within(self):
         note = FakeHeadingNote("doc.md", PARENT_WITH_CHILDREN)
@@ -2751,6 +2758,8 @@ class TestInsertDuplicateSibling:
         message = str(exc_info.value)
         assert "'Log::Decisions' already has a heading \"Entry new\"" in message
         assert "retry" in message
+        assert "unique under its parent" in message
+        assert f"'# Entry new (2)' or '# {date.today().isoformat()} Entry new'" in message
         assert "Nothing was written" in message
         assert note.markdown == once
         assert [r.method for r in seen] == ["GET"]
@@ -2894,3 +2903,51 @@ class TestPreconditionFailedHasNoTargetHint:
                     content="x",
                 )
         assert ObsidianVaultClient.HEADING_TARGET_HINT in str(exc_info.value)
+
+
+class TestRepeatedHeadingKeys:
+    """The fake keys repeated siblings the way the plugin does (verified live)."""
+
+    def test_repeat_key_encoding(self):
+        assert repeat_key("Update", 2) == "Update\U000fc750\U000f6440"
+        assert repeat_key("Update", 3) == "Update\U000fc750\U000f6441"
+        with pytest.raises(ValueError):
+            repeat_key("Update", 1)
+
+    def test_document_map_suffixes_repeated_siblings_only(self):
+        note = FakeHeadingNote(
+            "doc.md",
+            "# Log\n\n## Update\n\n### Notes\n\n## Update\n\n### Notes\n\n## Update\n",
+        )
+        assert note.document_map()["headings"] == {
+            "Log": {
+                "Update": {"Notes": {}},
+                repeat_key("Update", 2): {"Notes": {}},
+                repeat_key("Update", 3): {},
+            }
+        }
+
+    async def test_refusal_suggests_the_next_free_number(self):
+        note = FakeHeadingNote("doc.md", "# Log\n\n## Update\n\n## Update\n\n## Other\n")
+        async with TestSiblingInsertAndOverflow._client(note, []) as client:
+            with pytest.raises(ToolError, match=r"'# Update \(3\)'"):
+                await client.patch_note(
+                    "doc.md",
+                    operation="insert_after",
+                    target_type="heading",
+                    target="Log::Other",
+                    content="# Update\n",
+                )
+
+    async def test_child_refusal_counts_real_repeat_keys(self):
+        note = FakeHeadingNote("doc.md", "# Doc\n\n## Log\n\n## Log\n\n## Notes\n")
+        async with TestSiblingInsertAndOverflow._client(note, []) as client:
+            with pytest.raises(ToolError) as exc_info:
+                await client.patch_note(
+                    "doc.md",
+                    operation="replace",
+                    target_type="heading",
+                    target="Doc",
+                    content="x",
+                )
+        assert '"Log" (2 headings with this name), "Notes"' in str(exc_info.value)
