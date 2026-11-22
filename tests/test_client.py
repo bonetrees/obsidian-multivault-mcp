@@ -2951,3 +2951,43 @@ class TestRepeatedHeadingKeys:
                     content="x",
                 )
         assert '"Log" (2 headings with this name), "Notes"' in str(exc_info.value)
+
+
+class TestUniqueTitleSuggestions:
+    """Every title the duplicate refusal suggests is free under the parent."""
+
+    TODAY = date.today().isoformat()
+
+    @pytest.mark.parametrize(
+        "title, children, expected",
+        [
+            ("Update", ["Update"], ["Update (2)", f"{TODAY} Update"]),
+            ("Update", ["Update", "Update", "Update"], ["Update (4)", f"{TODAY} Update"]),
+            # Reported: 'Update (2)' is taken, so the number skips past it.
+            ("Update", ["Update", "Update (2)"], ["Update (3)", f"{TODAY} Update"]),
+            # Reported: a numbered title continues its own number.
+            ("Update (2)", ["Update", "Update (2)"], ["Update (3)", f"{TODAY} Update (2)"]),
+            ("Update (2)", ["Update (2)", "Update (3)"], ["Update (4)", f"{TODAY} Update (2)"]),
+            # Reported: a dated title gets no doubled date.
+            ("2026-11-21 Update", ["2026-11-21 Update"], ["2026-11-21 Update (2)"]),
+            # Today's dated title is taken too.
+            ("Update", ["Update", f"{TODAY} Update"], ["Update (2)"]),
+        ],
+    )
+    def test_suggestions(self, title, children, expected):
+        suggested = ObsidianVaultClient._unique_titles(title, children)
+        assert suggested == expected
+        assert not set(suggested) & set(children)
+
+    async def test_refusal_message_lists_only_free_titles(self):
+        note = FakeHeadingNote("doc.md", "# Log\n\n## Update\n\n## Update (2)\n")
+        async with TestSiblingInsertAndOverflow._client(note, []) as client:
+            with pytest.raises(ToolError) as exc_info:
+                await client.patch_note(
+                    "doc.md",
+                    operation="insert_after",
+                    target_type="heading",
+                    target="Log::Update (2)",
+                    content="# Update (2)\n",
+                )
+        assert str(exc_info.value).endswith(f"e.g. '# Update (3)' or '# {self.TODAY} Update (2)'.")

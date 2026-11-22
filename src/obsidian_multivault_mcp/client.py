@@ -875,8 +875,8 @@ class ObsidianVaultClient:
         """
         segments = self._heading_segments(target)
         title = self._atx_headings(content)[0][1]
-        copies = (await self._heading_children(path, segments[:-1])).count(title)
-        if not copies:
+        children = await self._heading_children(path, segments[:-1])
+        if title not in children:
             return
         parent = (
             f"'{self.HEADING_PATH_DELIMITER.join(segments[:-1])}'"
@@ -889,8 +889,34 @@ class ObsidianVaultClient:
             "first. Nothing was written. If this is a retry of an insert that already "
             "succeeded, there is nothing to do. Otherwise give the new section a title "
             "that's unique under its parent, e.g. "
-            f"'# {title} ({copies + 1})' or '# {date.today().isoformat()} {title}'."
+            + " or ".join(f"'# {name}'" for name in self._unique_titles(title, children))
+            + "."
         )
+
+    _NUMBERED_TITLE = re.compile(r"(.*) \((\d+)\)")
+    _DATED_TITLE = re.compile(r"\d{4}-\d{2}-\d{2}\b")
+
+    @classmethod
+    def _unique_titles(cls, title: str, children: list[str]) -> list[str]:
+        """Suggested replacements for a clashing title, none of them taken.
+
+        A numbered suggestion always: 'Update (2)' continues as 'Update (3)'
+        rather than 'Update (2) (2)', and the number skips past any that
+        already exist. A dated one too, unless the title already starts with
+        a date or today's version is taken.
+        """
+        existing = set(children)
+        base, number = title, children.count(title) + 1
+        numbered = cls._NUMBERED_TITLE.fullmatch(title)
+        if numbered:
+            base, number = numbered.group(1), int(numbered.group(2)) + 1
+        while f"{base} ({number})" in existing:
+            number += 1
+        titles = [f"{base} ({number})"]
+        dated = f"{date.today().isoformat()} {title}"
+        if not cls._DATED_TITLE.match(title) and dated not in existing:
+            titles.append(dated)
+        return titles
 
     async def _refuse_heading_overflow(
         self,
