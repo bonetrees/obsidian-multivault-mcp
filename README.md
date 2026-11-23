@@ -180,12 +180,19 @@ Restart Claude Desktop after editing the config.
 | `read_note` | Read a note's content (frontmatter stripped), parsed frontmatter, tags, stat, and `etag` (the note's version). |
 | `write_note` | Create or overwrite a note. `create_only=True` refuses to overwrite an existing note. |
 | `append_note` | Append content to the end of an existing note. (LLM must include leading `\n`.) |
-| `patch_note` | Surgically edit by heading / block reference / frontmatter key. Heading targets use `::` from the document root. Frontmatter keys take a string via `content`, or any JSON via `value`: lists (e.g. `tags`), objects, numbers and booleans. `create_if_missing=True` adds a key that doesn't exist yet. `operation="delete"` removes a heading section, block or key (`delete_scope` picks how much). A heading whose text contains `::` can be targeted with a list of heading texts. Returns any advisory `warnings` from the patch engine. |
+| `patch_note` | Surgically edit by heading / block reference / frontmatter key. Heading targets use `::` from the document root. Frontmatter keys take a string via `content`, or any JSON via `value`: lists (e.g. `tags`), objects, numbers and booleans. `create_if_missing=True` adds a key that doesn't exist yet. `operation="delete"` removes a heading section, block or key (`delete_scope` picks how much). A heading whose text contains `::` can be targeted with a list of heading texts. `insert_after` / `insert_before` add a sibling section. Headings in `content` are relative to the target, and absolute-looking levels are refused. A heading `replace` that would delete child headings is refused; `within` edits only a heading's intro. Returns any advisory `warnings` from the patch engine. |
 | `delete_note` | Delete a note. Requires `confirm=True` as a safety gate. |
 | `search_vault` | Text, JsonLogic, or Dataview DQL search in one vault. Dataview falls back to text search with a warning if the plugin is missing. |
 | `search_all_vaults` | Fan-out search across every configured vault in parallel. |
 
 **Safe read-then-write.** `write_note`, `append_note`, `patch_note` and `delete_note` all accept an optional `if_match`: pass the `etag` from `read_note` (or from the previous write's result), and the write is refused, with nothing changed, if the note was edited in the meantime, e.g. by you typing in Obsidian while an agent works. Without `if_match` writes are unconditional, as before. Requires plugin 5.x.
+
+## Agent skill
+
+[`skills/obsidian-multivault/SKILL.md`](skills/obsidian-multivault/SKILL.md) teaches an agent to use these tools well: which `patch_note` operation fits which intent, relative heading levels, sibling inserts, etags, and what each refusal means. The tool descriptions carry the critical rules, but they're limited to 2KB each, so the skill fills in the workflow.
+
+- **Claude Code:** copy the `obsidian-multivault` folder into `~/.claude/skills/` (every project) or `.claude/skills/` (one project).
+- **Claude apps:** zip the `obsidian-multivault` folder and upload it as a custom skill in Claude's settings.
 
 ## Development
 

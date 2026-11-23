@@ -775,6 +775,7 @@ class ObsidianVaultClient:
         operation: str,
         target: str | list[str],
         content: str,
+        within: int | None,
         replace_children: bool,
         allow_deep_headings: bool,
     ) -> None:
@@ -788,17 +789,23 @@ class ObsidianVaultClient:
         but that arrived after the bad heading was written and the repair
         was a whole-note rewrite. So both are refused instead, unless
         allow_deep_headings is set. A heading replace that would delete
-        children is refused too — see _refuse_child_loss.
+        children is refused too — see _refuse_child_loss. A `within` edit
+        is a literal splice, so none of that applies; it may carry no
+        heading at all — see _refuse_within_headings.
         """
         location = self._format_location(path)
         prefix = f"patch_note for vault '{self.name}'{location}:"
         joined = self.HEADING_PATH_DELIMITER.join(self._heading_segments(target))
         headings = self._atx_headings(content)
+        if within is not None:
+            self._refuse_within_headings(prefix, joined, headings)
+            return
         if not allow_deep_headings:
             self._refuse_absolute_levels(prefix, joined, operation, headings)
         if operation in self._INSERT_WIRE:
             self._refuse_headless_insert(prefix, joined, operation, content)
-            await self._refuse_duplicate_sibling(prefix, path, target, content)
+        if operation != "replace":
+            await self._refuse_duplicate_titles(prefix, path, operation, target, headings)
         if not allow_deep_headings and headings:
             await self._refuse_heading_overflow(prefix, joined, path, operation, target, headings)
         if operation == "replace" and not replace_children:
@@ -858,40 +865,87 @@ class ObsidianVaultClient:
             f"'{joined}' instead, use append or prepend."
         )
 
-    async def _refuse_duplicate_sibling(
-        self, prefix: str, path: str, target: str | list[str], content: str
+    def _refuse_within_headings(
+        self, prefix: str, joined: str, headings: list[tuple[int, str]]
     ) -> None:
-        """Refuse a sibling insert whose title the parent already has.
+        """Refuse a heading line in `within` content.
 
-        Retrying an insert adds a second copy: the REST API doesn't enable
-        the plugin's idempotency guard by default, and with it enabled the
-        guard only searches the target's own subtree, which a sibling lands
-        outside (both verified live on 5.5.2). A repeated name under one
-        parent is also unreachable by path, which only ever finds the first.
-        So a clash is refused, using the same document map as the child
-        check. One GET. There is deliberately no override (see CLAUDE.md,
+        A `within` edit is spliced literally into one intro block and never
+        rebased (verified live on 5.5.2), so a heading there splits the
+        target: the intro text after it, and every child heading below,
+        move under the new heading. The plugin returns 200 with no warning.
+        No request needed.
+        """
+        if not headings:
+            return
+        raise ToolError(
+            f"{prefix} refusing: content for 'within' has a heading line (\"{headings[0][1]}\"). "
+            "A 'within' edit splices text literally into one intro block, so a heading "
+            f"there would split '{joined}' and take over the child headings below it. "
+            "Nothing was written. To add a child section, use append or prepend with "
+            f"'# Title'; to add a section beside '{joined}', use insert_after or "
+            "insert_before."
+        )
+
+    async def _refuse_duplicate_titles(
+        self,
+        prefix: str,
+        path: str,
+        operation: str,
+        target: str | list[str],
+        headings: list[tuple[int, str]],
+    ) -> None:
+        """Refuse new sections whose title their parent already has.
+
+        The content's top-level (`#`) headings become children of the
+        target on append/prepend, and siblings of it on the inserts, so
+        each is checked against that parent's existing children, and
+        against the others in the same content. Retrying a write adds a
+        second copy: the REST API doesn't enable the plugin's idempotency
+        guard by default, and with it enabled the guard only searches the
+        target's own subtree, which a sibling lands outside (both verified
+        live on 5.5.2). A repeated name under one parent is also
+        unreachable by path, which only ever finds the first. One GET (the
+        document map, as for the child check), only when the content has a
+        `#` heading. There is deliberately no override (see CLAUDE.md,
         *Sibling inserts and heading levels*): unique titles keep every
         section addressable, so the message suggests one.
         """
-        segments = self._heading_segments(target)
-        title = self._atx_headings(content)[0][1]
-        children = await self._heading_children(path, segments[:-1])
-        if title not in children:
+        titles = [text for level, text in headings if level == 1]
+        if not titles:
             return
+        segments = self._heading_segments(target)
+        parent_segments = segments[:-1] if operation in self._INSERT_WIRE else segments
+        children = await self._heading_children(path, parent_segments)
         parent = (
-            f"'{self.HEADING_PATH_DELIMITER.join(segments[:-1])}'"
-            if len(segments) > 1
+            f"'{self.HEADING_PATH_DELIMITER.join(parent_segments)}'"
+            if parent_segments
             else "the document root"
         )
-        raise ToolError(
-            f'{prefix} refusing: {parent} already has a heading "{title}". Inserting '
-            "another would duplicate it, and a path to a repeated name reaches only the "
-            "first. Nothing was written. If this is a retry of an insert that already "
-            "succeeded, there is nothing to do. Otherwise give the new section a title "
-            "that's unique under its parent, e.g. "
-            + " or ".join(f"'# {name}'" for name in self._unique_titles(title, children))
-            + "."
-        )
+        seen: list[str] = []
+        for title in titles:
+            if title in children:
+                problem = (
+                    f'{parent} already has a heading "{title}". Adding another would '
+                    "duplicate it"
+                )
+                retry = (
+                    " If this is a retry of a write that already succeeded, there is "
+                    "nothing to do."
+                )
+            elif title in seen:
+                problem = f'the content has two "{title}" headings for {parent}'
+                retry = ""
+            else:
+                seen.append(title)
+                continue
+            raise ToolError(
+                f"{prefix} refusing: {problem}, and a path to a repeated name reaches only "
+                f"the first. Nothing was written.{retry} Otherwise give the new section a "
+                "title that's unique under its parent, e.g. "
+                + " or ".join(f"'# {name}'" for name in self._unique_titles(title, children + seen))
+                + "."
+            )
 
     _NUMBERED_TITLE = re.compile(r"(.*) \((\d+)\)")
     _DATED_TITLE = re.compile(r"\d{4}-\d{2}-\d{2}\b")
@@ -1176,9 +1230,9 @@ class ObsidianVaultClient:
             replace_children,
             allow_deep_headings,
         )
-        if wire_target_type == "heading" and within is None and content is not None:
+        if wire_target_type == "heading" and content is not None:
             await self._check_heading_patch(
-                path, operation, target, content, replace_children, allow_deep_headings
+                path, operation, target, content, within, replace_children, allow_deep_headings
             )
         response = await self._request(
             "PATCH",
