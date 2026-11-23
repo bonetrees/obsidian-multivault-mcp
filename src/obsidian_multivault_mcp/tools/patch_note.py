@@ -52,8 +52,10 @@ async def patch_note(  # pylint: disable=too-many-locals
                 "'# Title', since '#' there means a sibling of the target. The title "
                 "must be unique under the target's parent, because a path only reaches "
                 "the first of a repeated name: one the parent already has is refused "
-                "(which also makes a retry safe). For recurring entries, add a date or "
-                "number, e.g. '# 2026-11-22 Update'. "
+                "(which also makes a retry safe). The same holds for '#' headings "
+                "appended or prepended under a target: they must not repeat its "
+                "children's titles. For recurring entries, add a date or number, e.g. "
+                "'# 2026-11-22 Update', and add them with insert_after / insert_before. "
                 "append/prepend/replace/insert need 'content' (or 'value' for "
                 "frontmatter); delete takes neither. Append adds no newline: start "
                 "content with '\\n'."
@@ -92,7 +94,7 @@ async def patch_note(  # pylint: disable=too-many-locals
                 "(see allow_deep_headings). Frontmatter targets: always written as a "
                 "YAML string, so '1.0', 'true' and 'null' stay strings; content that "
                 "looks like a JSON list or object is refused, so use 'value'. With "
-                "'within', spliced literally into that one block."
+                "'within', spliced literally into that one block, with no heading lines."
             )
         ),
     ] = None,
@@ -156,8 +158,9 @@ async def patch_note(  # pylint: disable=too-many-locals
                 "heading: 0 is the first, -1 the last. Children are never touched. "
                 "replace swaps the block; append/prepend splice onto its end/start, so "
                 "append with '\\n- new item' extends a list. Use this to edit a parent "
-                "heading's intro. An out-of-range index fails, naming how many blocks "
-                "there are."
+                "heading's intro. The content is spliced literally, never rebased, so it "
+                "must contain no heading lines: one would split the section, so it's "
+                "refused. An out-of-range index fails, naming how many blocks there are."
             )
         ),
     ] = None,

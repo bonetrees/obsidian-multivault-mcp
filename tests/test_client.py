@@ -2333,18 +2333,23 @@ class TestPatchChildHeadings:
         assert ("reaches only the first" in message) is reach_note
         assert "\U000fc750" not in message
 
-    async def test_heading_level_check_skipped_for_within(self):
+    async def test_within_content_with_a_heading_line_is_refused(self):
+        # A within splice is literal, so this would land as a real h3 and
+        # split Doc. Refused before any request.
         note = FakeHeadingNote("doc.md", PARENT_WITH_CHILDREN)
-        async with self._client(note, []) as client:
-            warnings, _etag = await client.patch_note(
-                "doc.md",
-                operation="append",
-                target_type="heading",
-                target="Doc",
-                content="\n### not a heading here",
-                within=0,
-            )
-        assert warnings == []
+        seen = []
+        async with self._client(note, seen) as client:
+            with pytest.raises(ToolError, match="content for 'within' has a heading line"):
+                await client.patch_note(
+                    "doc.md",
+                    operation="append",
+                    target_type="heading",
+                    target="Doc",
+                    content="\n### not a heading here",
+                    within=0,
+                )
+        assert seen == []
+        assert note.markdown == PARENT_WITH_CHILDREN
 
     @pytest.mark.parametrize(
         "kwargs, fragment",
@@ -2552,8 +2557,11 @@ class TestSiblingInsertAndOverflow:
         assert "is an h5" in message
         assert "Nothing was written" in message
         assert "allow_deep_headings=True" in message
-        assert [r.method for r in seen] == ["GET"]
-        assert seen[0].headers["accept"] == "text/markdown"
+        # The duplicate check reads the map, the overflow check the note.
+        assert [(r.method, r.headers["accept"]) for r in seen] == [
+            ("GET", "application/vnd.olrapi.document-map+json"),
+            ("GET", "text/markdown"),
+        ]
         assert note.markdown == DEEP_NOTE
 
     async def test_overflow_up_to_h6_is_sent(self):
@@ -2580,7 +2588,10 @@ class TestSiblingInsertAndOverflow:
                 content="\n# Fine\n\n## Too deep\n",
                 allow_deep_headings=True,
             )
-        assert [r.method for r in seen] == ["PATCH"]
+        # The flag skips the note read for the overflow check; the
+        # duplicate check, which it doesn't cover, still reads the map.
+        assert [r.method for r in seen] == ["GET", "PATCH"]
+        assert seen[0].headers["accept"] == "application/vnd.olrapi.document-map+json"
         assert "####### Too deep" in note.markdown
 
     @pytest.mark.parametrize(
@@ -2991,3 +3002,142 @@ class TestUniqueTitleSuggestions:
                     content="# Update (2)\n",
                 )
         assert str(exc_info.value).endswith(f"e.g. '# Update (3)' or '# {self.TODAY} Update (2)'.")
+
+
+# The skill-review ticket's repro note.
+ENTRIES_NOTE = "# Log\n\n## Entries\n\nintro\n\n### Update\n\nu\n"
+
+
+class TestSkillReviewRefusals:
+    """Two writes that damaged a note with 200 and no warning, now refused."""
+
+    _client = staticmethod(TestSiblingInsertAndOverflow._client)
+
+    @pytest.mark.parametrize("operation", ["replace", "append", "prepend"])
+    async def test_heading_in_within_content_is_refused(self, operation):
+        # Reported: '# Sneaky' landed as an h1 inside Entries and took over
+        # '### Update'.
+        note = FakeHeadingNote("doc.md", ENTRIES_NOTE)
+        seen = []
+        async with self._client(note, seen) as client:
+            with pytest.raises(ToolError) as exc_info:
+                await client.patch_note(
+                    "doc.md",
+                    operation=operation,
+                    target_type="heading",
+                    target="Log::Entries",
+                    content="# Sneaky\n\nx",
+                    within=0,
+                )
+        message = str(exc_info.value)
+        assert '"Sneaky"' in message
+        assert "split 'Log::Entries'" in message
+        assert "insert_after" in message
+        assert "Nothing was written" in message
+        assert seen == []
+        assert note.markdown == ENTRIES_NOTE
+
+    @pytest.mark.parametrize("content", ["\n```\n# fenced\n```", " #hashtag", "\n- item"])
+    async def test_within_content_without_heading_lines_is_sent(self, content):
+        note = FakeHeadingNote("doc.md", ENTRIES_NOTE)
+        async with self._client(note, []) as client:
+            await client.patch_note(
+                "doc.md",
+                operation="append",
+                target_type="heading",
+                target="Log::Entries",
+                content=content,
+                within=0,
+            )
+        assert note.markdown != ENTRIES_NOTE
+
+    @pytest.mark.parametrize("operation", ["append", "prepend"])
+    async def test_appending_an_existing_child_title_is_refused(self, operation):
+        # Reported: appending '# Update' to the parent made a second
+        # '### Update', bypassing the insert-only duplicate check.
+        note = FakeHeadingNote("doc.md", ENTRIES_NOTE)
+        async with self._client(note, []) as client:
+            with pytest.raises(ToolError) as exc_info:
+                await client.patch_note(
+                    "doc.md",
+                    operation=operation,
+                    target_type="heading",
+                    target="Log::Entries",
+                    content="\n# Update\n\nv\n",
+                )
+        message = str(exc_info.value)
+        assert "'Log::Entries' already has a heading \"Update\"" in message
+        assert "retry of a write that already succeeded" in message
+        assert "'# Update (2)'" in message
+        assert note.markdown == ENTRIES_NOTE
+
+    async def test_appending_a_new_child_title_is_sent(self):
+        note = FakeHeadingNote("doc.md", ENTRIES_NOTE)
+        async with self._client(note, []) as client:
+            await client.patch_note(
+                "doc.md",
+                operation="append",
+                target_type="heading",
+                target="Log::Entries",
+                content="\n# Update (2)\n\nv\n",
+            )
+        assert note.markdown.endswith("### Update\n\nu\n\n### Update (2)\n\nv\n")
+
+    async def test_same_title_twice_in_content_is_refused(self):
+        note = FakeHeadingNote("doc.md", ENTRIES_NOTE)
+        async with self._client(note, []) as client:
+            with pytest.raises(ToolError) as exc_info:
+                await client.patch_note(
+                    "doc.md",
+                    operation="append",
+                    target_type="heading",
+                    target="Log::Entries",
+                    content="\n# Note\n\na\n\n# Note\n\nb\n",
+                )
+        message = str(exc_info.value)
+        assert "the content has two \"Note\" headings for 'Log::Entries'" in message
+        assert "retry" not in message
+        assert "'# Note (2)'" in message
+        assert note.markdown == ENTRIES_NOTE
+
+    async def test_insert_checks_every_top_level_title(self):
+        # The opening title is new; a later one clashes with a sibling.
+        note = FakeHeadingNote("doc.md", LOG_NOTE)
+        async with self._client(note, []) as client:
+            with pytest.raises(ToolError, match='already has a heading "Entry two"'):
+                await client.patch_note(
+                    "doc.md",
+                    operation="insert_after",
+                    target_type="heading",
+                    target="Log::Decisions::Entry one",
+                    content="# Entry new\n\nx\n\n# Entry two\n\ny\n",
+                )
+        assert note.markdown == LOG_NOTE
+
+    async def test_duplicate_check_ignores_deeper_headings(self):
+        # Only '#' headings become children; '## Update' would be a
+        # grandchild, under the new '# Fresh'.
+        note = FakeHeadingNote("doc.md", ENTRIES_NOTE)
+        async with self._client(note, []) as client:
+            await client.patch_note(
+                "doc.md",
+                operation="append",
+                target_type="heading",
+                target="Log::Entries",
+                content="\n# Fresh\n\n## Update\n",
+            )
+        assert "### Fresh\n\n#### Update" in note.markdown
+
+    async def test_replace_is_not_duplicate_checked(self):
+        # A replace swaps the children out, so their titles don't clash.
+        note = FakeHeadingNote("doc.md", ENTRIES_NOTE)
+        async with self._client(note, []) as client:
+            await client.patch_note(
+                "doc.md",
+                operation="replace",
+                target_type="heading",
+                target="Log::Entries",
+                content="new intro\n\n# Update\n\nnew u",
+                replace_children=True,
+            )
+        assert note.markdown.count("### Update") == 1
