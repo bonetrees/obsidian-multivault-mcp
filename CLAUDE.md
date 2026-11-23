@@ -38,6 +38,8 @@ src/obsidian_multivault_mcp/
     ├── delete_note.py
     ├── search_vault.py  # Text, JsonLogic (parse_jsonlogic_query helper), Dataview DQL (with fallback)
     └── search_all_vaults.py  # Parallel fan-out; eager jsonlogic input validation before fan-out
+skills/
+└── obsidian-multivault/SKILL.md  # Agent skill: how to use the tools well. Keep it in sync with tool behaviour
 tests/
 ├── __init__.py
 ├── conftest.py          # Mock client fixtures, FastMCP Client + mcp._lifespan swap
@@ -277,6 +279,7 @@ If any of these diverges from the docs, the mock-based tests are lying. Open an 
 - Python 3.13, type hints on all functions
 - Black + Pylint
 - LLM-facing docstrings on all tools (written for tool discovery, not developers)
+- **Keep `skills/obsidian-multivault/SKILL.md` in sync.** It's the agent-facing workflow guide. When a tool's behaviour, parameters or refusals change, update the skill in the same PR.
 - **Tool docstrings stay under 2KB.** Claude Code truncates tool descriptions at 2KB before the model sees them, so anything past the cut is silently lost (`patch_note`'s whole operations section once was). Put the rules a caller must not miss first, and per-parameter detail in `Annotated[..., Field(description=...)]`, which isn't truncated. `tests/test_tools.py::TestToolDescriptions` enforces the limit for every tool.
 - Logging: `%s` lazy formatting, stderr, `setup_logging("obsidian-multivault-mcp.module")`
 - `ToolError` for all failures, never `{"error": ...}` dicts
