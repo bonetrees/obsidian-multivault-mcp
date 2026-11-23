@@ -248,6 +248,21 @@ class FakeFrontmatterNote:
         return httpx.Response(200, text="patched")
 
 
+def repeat_key(name: str, occurrence: int) -> str:
+    """The document-map key the plugin gives the ``occurrence``-th heading
+    named ``name`` under one parent (2 = the second copy; the first is the
+    bare name).
+
+    Verified live on 5.5.2: a private-use marker, U+FC750, then
+    chr(0xF6440 + n), with n=0 for the second copy. The plugin accepts these
+    keys back as heading-target segments, but they're positional, so a copy
+    added above shifts them.
+    """
+    if occurrence < 2:
+        raise ValueError("the first occurrence is keyed by its bare name")
+    return f"{name}\U000fc750{chr(0xF6440 + occurrence - 2)}"
+
+
 class FakeHeadingNote:
     """Stateful fake of the plugin's v2 heading PATCH and document map.
 
@@ -269,7 +284,10 @@ class FakeHeadingNote:
       nested objects, e.g. {"Doc": {"Child": {}}}. GET with ``text/markdown``
       returns the note itself.
 
-    Not modelled: whitespace management, duplicate headings, frontmatter. The note is a list of blank-line-separated chunks,
+    Repeated sibling headings are keyed in the map the plugin's way (see
+    repeat_key), and a PATCH path reaches the first of them.
+
+    Not modelled: whitespace management, frontmatter. The note is a list of blank-line-separated chunks,
     each either a heading line or a body block, so test notes must use one
     blank line between blocks. Route PATCHes through
     markdown_patch_v2_handler so the v2 header contract is enforced too.
@@ -321,10 +339,18 @@ class FakeHeadingNote:
 
     def document_map(self) -> dict:
         tree: dict = {}
-        for path in self._paths().values():
-            node = tree
-            for segment in path:
-                node = node.setdefault(segment, {})
+        # (level, node, name → copies seen) per open heading, root first.
+        stack: list[tuple[int, dict, dict[str, int]]] = [(0, tree, {})]
+        for level, text in self.items:
+            if not level:
+                continue
+            while stack[-1][0] >= level:
+                stack.pop()
+            _, parent, seen = stack[-1]
+            seen[text] = seen.get(text, 0) + 1
+            key = text if seen[text] == 1 else repeat_key(text, seen[text])
+            parent[key] = {}
+            stack.append((level, parent[key], {}))
         return {"version": "fake", "frontmatterFields": [], "headings": tree, "blocks": []}
 
     @staticmethod

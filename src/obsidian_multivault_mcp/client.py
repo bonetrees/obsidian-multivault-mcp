@@ -14,6 +14,7 @@ import os
 import re
 import urllib.parse
 from collections import Counter
+from datetime import date
 from typing import Any
 
 import httpx
@@ -868,11 +869,14 @@ class ObsidianVaultClient:
         outside (both verified live on 5.5.2). A repeated name under one
         parent is also unreachable by path, which only ever finds the first.
         So a clash is refused, using the same document map as the child
-        check. One GET.
+        check. One GET. There is deliberately no override (see CLAUDE.md,
+        *Sibling inserts and heading levels*): unique titles keep every
+        section addressable, so the message suggests one.
         """
         segments = self._heading_segments(target)
         title = self._atx_headings(content)[0][1]
-        if title not in await self._heading_children(path, segments[:-1]):
+        children = await self._heading_children(path, segments[:-1])
+        if title not in children:
             return
         parent = (
             f"'{self.HEADING_PATH_DELIMITER.join(segments[:-1])}'"
@@ -883,9 +887,36 @@ class ObsidianVaultClient:
             f'{prefix} refusing: {parent} already has a heading "{title}". Inserting '
             "another would duplicate it, and a path to a repeated name reaches only the "
             "first. Nothing was written. If this is a retry of an insert that already "
-            "succeeded, there is nothing to do; otherwise give the new section a "
-            "distinct title."
+            "succeeded, there is nothing to do. Otherwise give the new section a title "
+            "that's unique under its parent, e.g. "
+            + " or ".join(f"'# {name}'" for name in self._unique_titles(title, children))
+            + "."
         )
+
+    _NUMBERED_TITLE = re.compile(r"(.*) \((\d+)\)")
+    _DATED_TITLE = re.compile(r"\d{4}-\d{2}-\d{2}\b")
+
+    @classmethod
+    def _unique_titles(cls, title: str, children: list[str]) -> list[str]:
+        """Suggested replacements for a clashing title, none of them taken.
+
+        A numbered suggestion always: 'Update (2)' continues as 'Update (3)'
+        rather than 'Update (2) (2)', and the number skips past any that
+        already exist. A dated one too, unless the title already starts with
+        a date or today's version is taken.
+        """
+        existing = set(children)
+        base, number = title, children.count(title) + 1
+        numbered = cls._NUMBERED_TITLE.fullmatch(title)
+        if numbered:
+            base, number = numbered.group(1), int(numbered.group(2)) + 1
+        while f"{base} ({number})" in existing:
+            number += 1
+        titles = [f"{base} ({number})"]
+        dated = f"{date.today().isoformat()} {title}"
+        if not cls._DATED_TITLE.match(title) and dated not in existing:
+            titles.append(dated)
+        return titles
 
     async def _refuse_heading_overflow(
         self,

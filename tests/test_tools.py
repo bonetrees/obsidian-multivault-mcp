@@ -634,6 +634,7 @@ class TestPatchNoteSiblingInsert:
         tool = next(t for t in await mcp_client.list_tools() if t.name == "patch_note")
         props = tool.inputSchema["properties"]
         assert {"insert_after", "insert_before"} <= set(props["operation"]["enum"])
+        assert "must be unique under the target's parent" in props["operation"]["description"]
         assert props["allow_deep_headings"]["type"] == "boolean"
 
 
