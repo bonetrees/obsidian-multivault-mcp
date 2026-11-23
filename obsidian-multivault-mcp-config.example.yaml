@@ -20,5 +20,5 @@ vaults:
   personal:
     scheme: "https"
     host: "127.0.0.1"
-    port: 27124
+    port: 27125              # every vault needs its own port
     api_key_env: "OBSIDIAN_PERSONAL_API_KEY"

@@ -18,9 +18,9 @@ tools for vault discovery, CRUD, search, and surgical patching.
   JSON arrays. Plugin 5.x *requires* that header and rejects a patch
   without it, while plugin 4.x and earlier predate the format entirely
   and would read the JSON array as a literal heading name. So patching
-  works against 5.x only — there is no version negotiation. Every other
-  tool (read, write, append, delete, list, search) still works against
-  3.4.3+, which is where `/search/simple/` was introduced.
+  works against 5.x only — there is no version negotiation. The other
+  tools may work against older plugin versions, but they aren't tested
+  there, and `if_match` needs 5.x, so 5.0 is the supported floor.
 
 ## Plugin Setup
 
@@ -30,10 +30,13 @@ installed and configured individually in Obsidian.
 For each vault, open Obsidian and go to *Settings → Local REST API*:
 
 1. **Copy the API key** — you'll paste this into your `.env` file.
-2. **Set a unique port** under *Advanced*. Each vault must listen on its
-   own port (e.g. vault A on 27124, vault B on 27125, matching the
-   HTTPS-default examples below). The port in the plugin must match the
-   `port` value in your YAML config.
+2. **Set unique ports** under *Advanced*. Every vault's plugin runs its
+   own HTTPS server (default 27124), and its HTTP server too if enabled
+   (default 27123), so each vault needs its own HTTPS port, plus its own
+   HTTP port if you use HTTP. No port may be shared with any other vault's
+   server. For example: vault A on 27124 (HTTPS) / 27123 (HTTP), vault B
+   on 27125 / 27126, matching the examples below. The port in the plugin
+   must match the `port` value in your YAML config.
 3. **If using HTTP:** toggle *"Enable non-encrypted (HTTP) server"* on.
    This is under the *Advanced* section. HTTP avoids self-signed
    certificate complexity and is fine for localhost.
@@ -82,7 +85,11 @@ vaults:
     api_key_env: "OBSIDIAN_PERSONAL_API_KEY"
 ```
 
-Example YAML (HTTP — requires enabling the insecure server in plugin settings):
+Example YAML (HTTP — requires enabling the non-encrypted server in plugin
+settings). Each vault's HTTPS server keeps running on its own port unless
+you turn it off, so the HTTP ports must avoid those too: here, devprojects
+serves HTTPS on 27124 and HTTP on 27123, and personal serves HTTPS on 27125
+and HTTP on 27126.
 
 ```yaml
 vaults:
@@ -94,7 +101,7 @@ vaults:
   personal:
     scheme: "http"
     host: "127.0.0.1"
-    port: 27124
+    port: 27126
     api_key_env: "OBSIDIAN_PERSONAL_API_KEY"
 ```
 
@@ -180,12 +187,21 @@ Restart Claude Desktop after editing the config.
 | `read_note` | Read a note's content (frontmatter stripped), parsed frontmatter, tags, stat, and `etag` (the note's version). |
 | `write_note` | Create or overwrite a note. `create_only=True` refuses to overwrite an existing note. |
 | `append_note` | Append content to the end of an existing note. (LLM must include leading `\n`.) |
-| `patch_note` | Surgically edit by heading / block reference / frontmatter key. Heading targets use `::` from the document root. Frontmatter keys take a string via `content`, or any JSON via `value`: lists (e.g. `tags`), objects, numbers and booleans. `create_if_missing=True` adds a key that doesn't exist yet. `operation="delete"` removes a heading section, block or key (`delete_scope` picks how much). A heading whose text contains `::` can be targeted with a list of heading texts. `insert_after` / `insert_before` add a sibling section. Headings in `content` are relative to the target, and absolute-looking levels are refused. A heading `replace` that would delete child headings is refused; `within` edits only a heading's intro. Returns any advisory `warnings` from the patch engine. |
+| `patch_note` | Surgically edit one heading section, block reference or frontmatter key. Operations: `append`, `prepend`, `replace`, `delete`, and `insert_after` / `insert_before` for a new sibling section. See below. |
 | `delete_note` | Delete a note. Requires `confirm=True` as a safety gate. |
 | `search_vault` | Text or JsonLogic search in one vault. JsonLogic queries frontmatter, tags and paths, with the plugin's `glob` and `regexp` operators. (Dataview DQL isn't offered: the REST API plugin dropped it.) |
 | `search_all_vaults` | Fan-out search across every configured vault in parallel. |
 
-**Safe read-then-write.** `write_note`, `append_note`, `patch_note` and `delete_note` all accept an optional `if_match`: pass the `etag` from `read_note` (or from the previous write's result), and the write is refused, with nothing changed, if the note was edited in the meantime, e.g. by you typing in Obsidian while an agent works. Without `if_match` writes are unconditional, as before. Requires plugin 5.x.
+**Safe read-then-write.** `write_note`, `append_note`, `patch_note` and `delete_note` all accept an optional `if_match`: pass the `etag` from `read_note` (or from the previous write's result), and the write is refused, with nothing changed, if the note was edited in the meantime, e.g. by you typing in Obsidian while an agent works. Without `if_match`, writes are unconditional.
+
+**`patch_note` refuses risky edits rather than guessing.** A refused patch writes nothing, and its error says what to do instead. Heading targets are the full path from the document root, joined with `::` (or a list of heading texts, for a heading whose own text contains `::`). It refuses:
+
+- headings in `content` whose levels look absolute (they're relative to the target, so `#` is a direct child), or would land past h6;
+- a heading `replace` that would delete child headings: use `within` to edit just the intro, target the child, or pass `replace_children=True`;
+- a new section whose title its parent already has. This also makes a retried insert safe;
+- heading lines in `within` content, which is spliced in literally.
+
+Frontmatter keys take a string via `content`, or any JSON via `value` (lists, objects, numbers, booleans); `create_if_missing=True` adds a missing key. `delete_scope` picks how much a delete removes. A successful patch may return advisory `warnings` from the plugin. The [agent skill](#agent-skill) covers all of this in workflow form.
 
 ## Agent skill
 
