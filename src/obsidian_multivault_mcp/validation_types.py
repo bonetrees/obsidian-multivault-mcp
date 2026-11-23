@@ -126,7 +126,9 @@ PatchOperation = Literal["append", "prepend", "replace", "delete", "insert_after
 DeleteScope = Literal["all", "content", "marker"]
 HeadingSegments = Annotated[list[str], AfterValidator(validate_heading_segments)]
 PatchTargetType = Literal["heading", "block-reference", "frontmatter-key"]
-SearchType = Literal["text", "jsonlogic", "dataview"]
+# No "dataview": obsidian-local-rest-api dropped DQL search before 4.1.7
+# (5.5.2's POST /search/ handles JsonLogic only), and this server needs 5.x.
+SearchType = Literal["text", "jsonlogic"]
 ClampedContextLength = Annotated[
     int,
     BeforeValidator(_reject_non_int_context_length),

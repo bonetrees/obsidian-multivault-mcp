@@ -18,8 +18,9 @@ Most mistakes here produce a **refusal with nothing written**, and the error mes
 - **Paths are relative to the vault root**, e.g. `projects/plan.md`. A folder on disk is usually a folder *inside* a vault, not a vault of its own.
 - To find things, use **`search_vault`** or, for a topic in an unknown vault, **`search_all_vaults`**, and **`list_directory`**. Don't guess paths. `search_type` is:
   - `text` (default): full-text search;
-  - `jsonlogic`: `query` is a JSON string, e.g. `'{"in": ["#project", {"var": "tags"}]}'`;
-  - `dataview`: Dataview DQL, **`TABLE` queries only**. Where the Dataview plugin isn't installed, this silently falls back to text search and the result carries a `warning`. In `search_all_vaults`, that's decided per vault.
+  - `jsonlogic`: `query` is a JSON string, e.g. `'{"in": ["#project", {"var": "tags"}]}'`. Use it for frontmatter, tags and paths; `glob` and `regexp` are available too, e.g. `'{"glob": ["projects/*", {"var": "path"}]}'`.
+
+  There's no Dataview (DQL) search: the REST API plugin doesn't offer it.
 
 ### Index.md: the vault's map
 

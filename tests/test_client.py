@@ -1819,16 +1819,6 @@ class TestSearchShapeValidation:
         assert "Expected JSON array" in str(exc_info.value)
         assert "search_jsonlogic" in str(exc_info.value)
 
-    async def test_dataview_non_list_body_raises(self):
-        def handler(_request):
-            return httpx.Response(200, json="unexpected scalar")
-
-        async with make_client(handler) as client:
-            with pytest.raises(ToolError) as exc_info:
-                await client.search_dataview("TABLE FROM #x")
-        assert "Expected JSON array" in str(exc_info.value)
-        assert "search_dataview" in str(exc_info.value)
-
     async def test_search_simple_non_dict_element_raises(self):
         # Search curators do .get("filename"); a non-dict element would
         # AttributeError out of the tool layer and break the
@@ -1845,61 +1835,6 @@ class TestSearchShapeValidation:
         assert "[1]" in msg
         assert "JSON object" in msg
         assert "str" in msg
-
-
-class TestSearchDataview:
-    async def test_success_returns_no_warning(self):
-        seen = {}
-
-        def handler(request):
-            seen["content-type"] = request.headers["content-type"]
-            seen["body"] = request.content.decode()
-            return httpx.Response(200, json=[{"filename": "a.md", "result": ["row1"]}])
-
-        async with make_client(handler) as client:
-            results, warning = await client.search_dataview("TABLE FROM #tag")
-        assert seen["content-type"] == "application/vnd.olrapi.dataview.dql+txt"
-        assert seen["body"] == "TABLE FROM #tag"
-        assert warning is None
-        assert results == [{"filename": "a.md", "result": ["row1"]}]
-
-    async def test_fallback_when_dataview_unavailable(self):
-        calls = []
-
-        def handler(request):
-            calls.append((request.method, request.url.path, dict(request.url.params)))
-            if request.url.path == "/search/":
-                return httpx.Response(
-                    400,
-                    json={
-                        "errorCode": 40070,
-                        "message": "Dataview plugin is not enabled.",
-                    },
-                )
-            # fallback hits /search/simple/
-            return httpx.Response(
-                200,
-                json=[{"filename": "a.md", "score": -0.1, "matches": []}],
-            )
-
-        async with make_client(handler) as client:
-            results, warning = await client.search_dataview("LIST FROM #x", context_length=80)
-        assert warning == "Dataview not available, fell back to text search"
-        assert len(calls) == 2
-        assert calls[0][1] == "/search/"
-        assert calls[1][1] == "/search/simple/"
-        assert calls[1][2]["query"] == "LIST FROM #x"
-        assert calls[1][2]["contextLength"] == "80"
-        assert results[0]["filename"] == "a.md"
-
-    async def test_other_400_still_raises(self):
-        def handler(_request):
-            return httpx.Response(400, json={"errorCode": 40099, "message": "Some other problem"})
-
-        async with make_client(handler) as client:
-            with pytest.raises(ToolError) as exc_info:
-                await client.search_dataview("INVALID QUERY")
-        assert "Some other problem" in str(exc_info.value)
 
 
 class TestConnectAndTimeoutErrors:

@@ -812,8 +812,6 @@ class TestSearchVault:
                 ctype = request.headers.get("content-type", "")
                 if "jsonlogic" in ctype:
                     return _ok([{"filename": "b.md", "result": True}])
-                if "dataview" in ctype:
-                    return _ok([{"filename": "c.md", "result": ["row"]}])
             return httpx.Response(404)
 
         return {"v": vault}
@@ -825,7 +823,7 @@ class TestSearchVault:
         assert data["results"][0]["path"] == "notes/a.md"
         assert data["results"][0]["score"] == -0.5
         assert data["results"][0]["context"] == ["hello"]
-        assert data["warning"] is None
+        assert "warning" not in data
 
     async def test_jsonlogic_search(self, mcp_client):
         data = await _call(
@@ -838,6 +836,7 @@ class TestSearchVault:
             },
         )
         assert data["results"] == [{"path": "b.md", "score": None, "context": []}]
+        assert "warning" not in data
 
     async def test_jsonlogic_non_object_root_raises(self, mcp_client):
         # JsonLogic expressions are objects; parsing "[]" succeeds but isn't
@@ -860,44 +859,6 @@ class TestSearchVault:
                 {"vault": "v", "query": "not json", "search_type": "jsonlogic"},
             )
         assert "valid JSON" in str(exc_info.value)
-
-    async def test_dataview_success(self, mcp_client):
-        data = await _call(
-            mcp_client,
-            "search_vault",
-            {"vault": "v", "query": "TABLE FROM #x", "search_type": "dataview"},
-        )
-        assert data["results"] == [{"path": "c.md", "score": None, "context": []}]
-        assert data["warning"] is None
-
-
-class TestSearchVaultDataviewFallback:
-    @pytest.fixture
-    def vault_handlers(self):
-        def vault(request):
-            if request.url.path == "/search/":
-                # Dataview not installed
-                return httpx.Response(
-                    400,
-                    json={
-                        "errorCode": 40070,
-                        "message": "Dataview plugin is not enabled.",
-                    },
-                )
-            if request.url.path == "/search/simple/":
-                return _ok([{"filename": "a.md", "score": -0.1, "matches": []}])
-            return httpx.Response(404)
-
-        return {"v": vault}
-
-    async def test_fallback_warning(self, mcp_client):
-        data = await _call(
-            mcp_client,
-            "search_vault",
-            {"vault": "v", "query": "LIST FROM #x", "search_type": "dataview"},
-        )
-        assert data["warning"] == "Dataview not available, fell back to text search"
-        assert data["results"][0]["path"] == "a.md"
 
 
 # ---------- search_all_vaults ----------
@@ -1030,32 +991,47 @@ class TestSearchAllVaultsIsolatesUnexpectedExceptions:
         assert "RuntimeError" in rbv["bad"]["error"] or "oh no" in rbv["bad"]["error"]
 
 
-class TestSearchAllVaultsPerVaultDataviewFallback:
+class TestDataviewSearchRemoved:
+    """obsidian-local-rest-api dropped Dataview DQL search before 4.1.7 (5.5.2's
+    POST /search/ handles JsonLogic only), so search_type="dataview" is gone
+    from both search tools, along with the `warning` its fallback produced."""
+
     @pytest.fixture
     def vault_handlers(self):
-        # alpha has Dataview, beta does not
-        def alpha(request):
-            if request.url.path == "/search/" and "dataview" in request.headers.get(
-                "content-type", ""
-            ):
-                return _ok([{"filename": "a.md", "result": ["x"]}])
-            return httpx.Response(404)
-
-        def beta(request):
-            if request.url.path == "/search/":
-                return httpx.Response(400, json={"errorCode": 40070, "message": "no dataview"})
+        def vault(request):
             if request.url.path == "/search/simple/":
-                return _ok([{"filename": "b.md", "score": -0.1, "matches": []}])
+                return _ok([{"filename": "a.md", "score": -0.1, "matches": []}])
             return httpx.Response(404)
 
-        return {"alpha": alpha, "beta": beta}
+        return {"alpha": vault, "beta": vault}
 
-    async def test_warning_only_for_falling_back_vault(self, mcp_client):
-        data = await _call(
-            mcp_client,
-            "search_all_vaults",
-            {"query": "LIST FROM #x", "search_type": "dataview"},
-        )
-        rbv = data["results_by_vault"]
-        assert rbv["alpha"]["warning"] is None
-        assert rbv["beta"]["warning"] == "Dataview not available, fell back to text search"
+    @pytest.mark.parametrize("tool", ["search_vault", "search_all_vaults"])
+    async def test_schema_offers_only_text_and_jsonlogic(self, mcp_client, tool):
+        schema = next(t for t in await mcp_client.list_tools() if t.name == tool).inputSchema
+        assert schema["properties"]["search_type"]["enum"] == ["text", "jsonlogic"]
+
+    @pytest.mark.parametrize(
+        "tool, args",
+        [
+            ("search_vault", {"vault": "alpha", "query": "TABLE FROM #x"}),
+            ("search_all_vaults", {"query": "TABLE FROM #x"}),
+        ],
+    )
+    async def test_dataview_is_rejected(self, mcp_client, tool, args):
+        # Refused by the schema, before any request: the handlers would
+        # answer /search/ with a 404, which reads differently.
+        with pytest.raises(ToolError) as exc_info:
+            await _call(mcp_client, tool, {**args, "search_type": "dataview"})
+        assert "search_type" in str(exc_info.value)
+        assert "404" not in str(exc_info.value)
+
+    @pytest.mark.parametrize("tool", ["search_vault", "search_all_vaults"])
+    async def test_descriptions_do_not_mention_a_warning(self, mcp_client, tool):
+        description = next(t for t in await mcp_client.list_tools() if t.name == tool).description
+        assert "warning" not in description
+
+    async def test_all_vaults_entries_have_no_warning(self, mcp_client):
+        data = await _call(mcp_client, "search_all_vaults", {"query": "x"})
+        for entry in data["results_by_vault"].values():
+            assert entry["status"] == "ok"
+            assert "warning" not in entry

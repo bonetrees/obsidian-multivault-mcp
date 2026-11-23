@@ -1,4 +1,4 @@
-"""Tool: search_vault — text, JsonLogic, or Dataview DQL search in one vault."""
+"""Tool: search_vault — text or JsonLogic search in one vault."""
 
 import json
 
@@ -43,24 +43,15 @@ def parse_jsonlogic_query(query: str) -> dict:
     return parsed
 
 
-async def run_search(
-    client, search_type: str, query: str, context_length: int
-) -> tuple[list[dict], str | None]:
-    """Dispatch one search against a single vault client. Returns
-    (curated_results, optional_warning)."""
+async def run_search(client, search_type: str, query: str, context_length: int) -> list[dict]:
+    """Dispatch one search against a single vault client; returns curated results."""
     if search_type == "text":
         raw = await client.search_simple(query, context_length)
-        return [curate_simple_match(item) for item in raw], None
+        return [curate_simple_match(item) for item in raw]
     if search_type == "jsonlogic":
         parsed = parse_jsonlogic_query(query)
         raw = await client.search_jsonlogic(parsed)
-        return [curate_structured_match(item) for item in raw], None
-    if search_type == "dataview":
-        raw, warning = await client.search_dataview(query, context_length)
-        if warning is None:
-            return [curate_structured_match(item) for item in raw], None
-        # fallback path returned search_simple-shaped results
-        return [curate_simple_match(item) for item in raw], warning
+        return [curate_structured_match(item) for item in raw]
     raise ToolError(f"Unknown search_type: {search_type!r}.")
 
 
@@ -75,29 +66,28 @@ async def search_vault(
     search_type: SearchType = "text",
     context_length: ClampedContextLength = 100,
 ) -> dict:
-    """Search a single vault using text, JsonLogic, or Dataview DQL.
+    """Search a single vault using text or JsonLogic.
 
     - `search_type="text"` (default) — simple full-text search. Always
       available. `context_length` controls characters of surrounding
       context per match (clamped to 20..500).
     - `search_type="jsonlogic"` — structured query against frontmatter,
       tags, and path. `query` must be a JSON string holding a JsonLogic
-      expression, e.g. `'{"in": ["#project", {"var": "tags"}]}'`.
-    - `search_type="dataview"` — Dataview DQL query (only TABLE queries
-      are supported by the plugin). If the Dataview plugin is not
-      installed in the target vault, this silently falls back to text
-      search and the response includes a `warning` string.
+      expression, e.g. `'{"in": ["#project", {"var": "tags"}]}'`. Besides
+      the standard operators, `glob` and `regexp` are available, e.g.
+      `'{"glob": ["projects/*", {"var": "path"}]}'`.
+
+    Dataview DQL isn't supported: the REST API plugin no longer offers it.
 
     For cross-vault search, use `search_all_vaults`. Keep queries
     specific — broad searches in large vaults can be slow.
     """
     client = get_client(ctx, vault)
-    results, warning = await run_search(client, search_type, query, context_length)
+    results = await run_search(client, search_type, query, context_length)
     return {
         "vault": vault,
         "query": query,
         "search_type": search_type,
         "results": results,
         "total_results": len(results),
-        "warning": warning,
     }

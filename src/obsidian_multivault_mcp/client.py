@@ -48,7 +48,6 @@ class ObsidianVaultClient:
     DEFAULT_TIMEOUT = 30.0
     CONNECT_TIMEOUT = 10.0
 
-    DATAVIEW_NOT_INSTALLED_CODE = 40070
     INVALID_PATCH_TARGET_CODE = 40080
 
     # markdown-patch protocol version for header-based PATCH targeting.
@@ -1330,29 +1329,3 @@ class ObsidianVaultClient:
         self._raise_for_status(response, "search_jsonlogic")
         body = self._parse_json(response, "search_jsonlogic")
         return self._require_list_of_dicts(body, "search_jsonlogic")
-
-    async def search_dataview(
-        self, query: str, context_length: int = 100
-    ) -> tuple[list[dict], str | None]:
-        """Returns (results, warning). On Dataview-not-installed (40070), falls
-        back to search_simple and the warning is populated.
-        """
-        response = await self._request(
-            "POST",
-            "/search/",
-            operation="search_dataview",
-            content=query.encode("utf-8"),
-            headers={"Content-Type": "application/vnd.olrapi.dataview.dql+txt"},
-        )
-        if response.status_code == 400:
-            body = self._safe_json_object(response)
-            if body.get("errorCode") == self.DATAVIEW_NOT_INSTALLED_CODE:
-                logger.info(
-                    "Dataview not installed in vault '%s'; falling back to text search.",
-                    self.name,
-                )
-                fallback = await self.search_simple(query, context_length)
-                return fallback, "Dataview not available, fell back to text search"
-        self._raise_for_status(response, "search_dataview")
-        body = self._parse_json(response, "search_dataview")
-        return self._require_list_of_dicts(body, "search_dataview"), None

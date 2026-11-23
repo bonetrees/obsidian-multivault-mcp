@@ -223,10 +223,12 @@ class TestPatchTargetType:
 class TestSearchType:
     adapter = TypeAdapter(SearchType)
 
-    @pytest.mark.parametrize("st", ["text", "jsonlogic", "dataview"])
+    @pytest.mark.parametrize("st", ["text", "jsonlogic"])
     def test_valid(self, st):
         assert self.adapter.validate_python(st) == st
 
-    def test_invalid_rejected(self):
+    # "dataview": the plugin dropped DQL search, so it's no longer offered.
+    @pytest.mark.parametrize("st", ["regex", "dataview"])
+    def test_invalid_rejected(self, st):
         with pytest.raises(ValidationError):
-            self.adapter.validate_python("regex")
+            self.adapter.validate_python(st)
