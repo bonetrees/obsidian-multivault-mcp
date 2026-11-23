@@ -14,12 +14,11 @@ logger = setup_logging("obsidian-multivault-mcp.tools.search_all_vaults")
 
 async def _one_vault(name, client, search_type, query, context_length) -> tuple[str, dict]:
     try:
-        results, warning = await run_search(client, search_type, query, context_length)
+        results = await run_search(client, search_type, query, context_length)
         return name, {
             "status": "ok",
             "results": results,
             "total_results": len(results),
-            "warning": warning,
             "error": None,
         }
     # Cooperative cancellation (request abort, server shutdown) must propagate
@@ -40,7 +39,6 @@ async def _one_vault(name, client, search_type, query, context_length) -> tuple[
             "status": "error",
             "results": [],
             "total_results": 0,
-            "warning": None,
             "error": f"{type(exc).__name__}: {exc}",
         }
 
@@ -64,9 +62,7 @@ async def search_all_vaults(
     - Individual vault failures do not fail the whole call — each vault's
       entry under `results_by_vault` has its own `status` (`"ok"` or
       `"error"`) and `error` message.
-    - Dataview fallback is **per-vault**: if vault A has Dataview but
-      vault B does not, vault A runs DQL while vault B silently falls
-      back to text search, with its own `warning` set.
+    - `search_type` is `"text"` or `"jsonlogic"`, as for `search_vault`.
 
     Tip: call `list_vaults` first if you need to understand vault
     structure before searching, especially when picking a `search_type`.

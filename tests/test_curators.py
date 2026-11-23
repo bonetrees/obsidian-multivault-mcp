@@ -194,8 +194,3 @@ class TestCurateStructuredMatch:
         raw = {"filename": "a.md", "result": True}
         result = curate_structured_match(raw)
         assert result == {"path": "a.md", "score": None, "context": []}
-
-    def test_dataview_drops_result(self):
-        raw = {"filename": "a.md", "result": ["row1", "row2"]}
-        result = curate_structured_match(raw)
-        assert result == {"path": "a.md", "score": None, "context": []}

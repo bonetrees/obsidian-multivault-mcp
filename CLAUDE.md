@@ -36,7 +36,7 @@ src/obsidian_multivault_mcp/
     ├── append_note.py
     ├── patch_note.py    # Surgical heading/block/frontmatter targeting
     ├── delete_note.py
-    ├── search_vault.py  # Text, JsonLogic (parse_jsonlogic_query helper), Dataview DQL (with fallback)
+    ├── search_vault.py  # Text and JsonLogic (parse_jsonlogic_query helper)
     └── search_all_vaults.py  # Parallel fan-out; eager jsonlogic input validation before fan-out
 skills/
 └── obsidian-multivault/SKILL.md  # Agent skill: how to use the tools well. Keep it in sync with tool behaviour
@@ -71,7 +71,7 @@ tests/
 
 - **Timeout enforcement.** `httpx.Timeout(30.0, connect=10.0)` on client. Configurable via `OBSIDIAN_MCP_TIMEOUT`. Timeout exceptions caught and raised as `ToolError` with vault name and operation. **Health check uses a 3 s timeout** (constant `HEALTH_CHECK_TIMEOUT` on the client, not user-configurable) so `list_vaults` doesn't hang when a vault is offline; `get_status()` never raises, it returns `False` on any failure.
 
-- **Client API pattern.** Per-endpoint methods on `ObsidianVaultClient`: `read_note()`, `write_note()`, `append_note()`, `patch_note()`, `delete_note()`, `list_directory()`, `search_simple()`, `search_jsonlogic()`, `search_dataview()`, `get_status()`.
+- **Client API pattern.** Per-endpoint methods on `ObsidianVaultClient`: `read_note()`, `write_note()`, `append_note()`, `patch_note()`, `delete_note()`, `list_directory()`, `search_simple()`, `search_jsonlogic()`, `get_status()`.
 
 - **Tool naming.** Python function names = MCP names. No `name=` override, no gateway prefix.
 
@@ -89,7 +89,7 @@ tests/
 
 - **Empty results.** Search returning `[]` is valid, not an error. Vault with no `Index.md` returns `index: None` in `list_vaults`, not an error.
 
-- **Dataview fallback.** When Dataview not installed, API returns HTTP 400 with `errorCode: 40070`. `search_dataview()` returns `tuple[list[dict], str | None]` — second element is the warning string when fallback happened (`"Dataview not available, fell back to text search"`), otherwise `None`. **Fallback is per-vault** — in `search_all_vaults`, if vault A has Dataview and vault B doesn't, each handles fallback independently inside its own client call.
+- **No Dataview search.** `search_type` is `"text"` or `"jsonlogic"` only. obsidian-local-rest-api dropped Dataview DQL search before 4.1.7: 2.0.0 imported the Dataview API, but 4.1.7 through 5.5.2 register a single `POST /search/` handler, JsonLogic. Any other `Content-Type`, the old `application/vnd.olrapi.dataview.dql+txt` included, is `400`/`40012` whether or not Dataview is installed. The server used to send DQL and fall back to text search on `40070`. But in 5.x, `40070` is `InvalidFilterQuery` (a JsonLogic evaluation failure), so that fallback never ran, and every live DQL search failed with `40012` (Asana, 2026-11-22). The option and the search tools' `warning` field (its only producer) were removed. Don't re-add it unless the plugin brings DQL back.
 
 ## Known Issues / Gotchas
 
@@ -103,7 +103,7 @@ Transport errors are caught in `_request()` and mapped to `ToolError`.
 | HTTP 401 | `_raise_for_status` | `ToolError`: auth failed, check API key |
 | HTTP 404 | `_raise_for_status` | `NotFound` (subclass of `ToolError`): not found at path |
 | HTTP 405 | `_raise_for_status` | `ToolError`: operation not supported |
-| HTTP 400 + `errorCode: 40070` | `search_dataview` | Silent fallback to text search; warning string returned |
+| HTTP 400 + `errorCode: 40070` | `_raise_for_status` (generic) | `ToolError`: the plugin couldn't evaluate a JsonLogic query (`InvalidFilterQuery`). Not "Dataview not installed": see *No Dataview search* |
 | HTTP 400 + `errorCode: 40080` | `_raise_for_status` | `ToolError`: invalid PATCH target (+ `hint` when the caller passed one) |
 | HTTP 400 + `errorCode: 40082/40083/40084` | `_raise_for_status` | `ToolError`: "PATCH protocol mismatch" — client/plugin disagree on the markdown-patch format. Names the version header we send; check the plugin version |
 | HTTP 409 (patch) | `_raise_for_status` (generic) | `ToolError`: content preexists / frontmatter key collision |
@@ -210,8 +210,7 @@ Plugin semantics, probed live on 5.5.2 and modelled by `tests/plugin_fakes.py::F
 ### Search endpoints differ by type
 
 - Text: `POST /search/simple/?query=...&contextLength=...` (URL params)
-- JsonLogic: `POST /search/` with `Content-Type: application/vnd.olrapi.jsonlogic+json` (JSON body)
-- Dataview: `POST /search/` with `Content-Type: application/vnd.olrapi.dataview.dql+txt` (text body)
+- JsonLogic: `POST /search/` with `Content-Type: application/vnd.olrapi.jsonlogic+json` (JSON body). The plugin adds `glob` and `regexp` operators. It's the only `/search/` format 5.x accepts.
 
 These are different endpoints with different request formats — not the same endpoint with different bodies.
 
@@ -259,7 +258,7 @@ The automated test suite mocks every HTTP exchange. A handful of assumptions are
    **Then preconditions:** `read_note` → confirm `etag` equals the plugin's own `ETag` from a HEAD and is not `W/`-prefixed. For each of the four write tools: `read_note`, edit the note out of band (raw PUT, or type in Obsidian), then call the tool with the stale `if_match` → it must fail with "Precondition failed" and leave the edit intact. Also `write_note(create_only=True)` against an existing note → "already exists", untouched.
 7. **`search_vault`** with `search_type="text"` — confirm `results[].context` strings are populated.
 8. **`search_vault`** with `search_type="jsonlogic"` and a real expression like `{"in": ["#project", {"var": "tags"}]}` — confirm matches.
-9. **`search_vault`** with `search_type="dataview"` in a vault **with** Dataview installed — confirm `warning` is `None`. In a vault **without** Dataview — confirm `warning` is `"Dataview not available, fell back to text search"` and results come from the text search fallback.
+9. **`search_vault`** with `search_type="dataview"` — confirm it's refused by schema validation, before any request. Neither search tool's result should have a `warning` key.
 10. **`search_all_vaults`** with two vaults configured, one offline — confirm the online one returns results and the offline one shows `status: "error"` with a connection error, not a whole-tool failure.
 
 If any of these diverges from the docs, the mock-based tests are lying. Open an issue with the actual response shape and update the relevant curator / handler.

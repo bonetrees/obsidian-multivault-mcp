@@ -56,12 +56,11 @@ def curate_simple_match(raw: dict) -> dict:
 
 
 def curate_structured_match(raw: dict) -> dict:
-    """Curate one result entry from POST /search/ (JsonLogic or Dataview).
+    """Curate one result entry from POST /search/ (JsonLogic).
 
-    JsonLogic returns `{filename, result: bool}`; Dataview returns
-    `{filename, result: [...]}` (list rows). Neither carries scores or
-    context strings, so we drop the `result` field and emit a uniform
-    shape with empty context.
+    JsonLogic returns `{filename, result}`, with no score or context
+    strings, so we drop the `result` field and emit a uniform shape with
+    empty context.
     """
     return {
         "path": raw.get("filename", ""),
